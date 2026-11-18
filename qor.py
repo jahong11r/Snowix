@@ -30,7 +30,7 @@ GRAVITY = 0.6
 MAX_BALL = 56
 GAIN = 4.2               # qor parchasi maydoni -> qatlam maydoni
 BALL_GAIN = 4.0          # sharcha maydoni = olingan qor maydoni * BALL_GAIN
-MAX_CHUNKS = 420
+MAX_CHUNKS = 650
 APP_NAME = "YangiYilQori"
 FLAKE_FILL = ["#c3d4e7", "#dae7f4", "#eef5fb", "#ffffff"]
 BULBS = [("#ff2a2a", "#3d0c0c"), ("#ffb02e", "#3d2a0c"), ("#3dff6e", "#0c3d1a"),
@@ -283,9 +283,9 @@ def compute_profile(buf, w, h_total, margin, thresh=42, skip_first=False):
     return out
 
 
-def profile_ok(prof):
+def profile_ok(prof, min_solid=0.4):
     solid = [p for p in prof if p is not None]
-    if len(solid) < 0.25 * len(prof):
+    if len(solid) < min_solid * len(prof):
         return False
     flat = sum(1 for p in solid if p <= 1)
     if flat >= 0.85 * len(solid) and len(solid) > 0.9 * len(prof):
@@ -434,8 +434,14 @@ class DesktopIcons:
         buf = grab_screen(int(l), int(t - m), w, h + m)
         if buf is None:
             return None
-        prof = compute_profile(buf, w, h + m, m, skip_first=sel)
-        return prof if profile_ok(prof) else None
+        prof = compute_profile(buf, w, h + m, m)
+        if profile_ok(prof):
+            return prof
+        if sel:        # ko'k tanlov foni bor: uning chetini o'tkazib yuboramiz
+            prof = compute_profile(buf, w, h + m, m, skip_first=True)
+            if profile_ok(prof, 0.5):
+                return prof
+        return None
 
     def query(self, covered, mouse):
         """[(indeks, l, t, r, b, profil)] — ikonka rasmi to'rtburchagi va silueti."""
@@ -549,14 +555,19 @@ class Flake:
 
 
 class Chunk:
-    """Qor bo'lagi (sharcha parchasi, to'kilgan qor yoki chang)."""
-    __slots__ = ("x", "y", "vx", "vy", "r", "dust", "item", "shape")
+    """Qor bo'lagi: katta bo'lak (sharcha parchasi), chang yoki yumshoq zarra (soft)."""
+    __slots__ = ("x", "y", "vx", "vy", "r", "dust", "soft", "item", "shape", "ph",
+                 "vmax", "ang", "spin", "tier", "age")
 
     def __init__(self, x, y, vx, vy, r, dust):
         self.x, self.y, self.vx, self.vy, self.r = x, y, vx, vy, r
         self.dust = dust
+        self.soft = False
         self.item = None
         self.shape = None if dust else rough_shape(5, 7, 0.65, 1.2)
+        self.ph = self.vmax = self.ang = self.spin = 0.0
+        self.tier = 3
+        self.age = 0
 
 
 class Part:
@@ -588,6 +599,8 @@ class Pile:
         self.vis = None
         self.base = None          # ikonka silueti (har ustun uchun tepadan masofa yoki None)
         self.prof_id = -1
+        self.moving = False       # oyna hozir siljiyaptimi (qor faqat boshida uchadi)
+        self.still = 0
         self.items = []           # chizilgan [tana, ustki qatlam, ko'rinadimi] juftliklari
         self.dirty = True
         self.x0 = self.x1 = self.y = None
@@ -606,6 +619,7 @@ class Pile:
             del self.noise[n:]
         if (x0, x1, y) != (self.x0, self.x1, self.y):
             self.dirty = True
+        self.prev_y = self.y if self.y is not None else y
         self.x0, self.x1, self.y = x0, x1, y
 
     def set_profile(self, profile, wpx):
@@ -958,12 +972,49 @@ class World:
             return
         self.chunks.append(Chunk(x, y, vx, vy, r, dust))
 
+    def spawn_soft(self, x, y, vx, vy, r):
+        """Mayda, shakli notekis, yumshoq tushadigan qor zarrasi."""
+        S = self.S
+        x = min(max(x, 1.0), self.W - 1.0)
+        lim = 30 * S
+        vx = max(-lim, min(lim, vx))
+        if len(self.chunks) >= MAX_CHUNKS:
+            self.ground_pile.add(x, r)
+            return
+        c = Chunk(x, y, vx, vy, r, False)
+        c.soft = True
+        c.shape = rough_shape(4, 6, 0.6, 1.25, random.uniform(1.0, 1.5))
+        c.ph = random.uniform(0, 6.28)
+        c.vmax = random.uniform(1.8, 3.6) * S
+        c.ang = random.uniform(0, 6.28)
+        c.spin = random.uniform(-0.12, 0.12)
+        c.tier = random.choice((2, 3, 3))
+        self.chunks.append(c)
+
+    def land_on(self, x, oy, y):
+        """Tushayotgan qor oyna yoki ikonka ustiga tushsa, o'sha sirtni qaytaradi.
+        Oyna qor ichiga qarab siljisa ham (yuqoriga yoki yon tomonga), qorni ushlab oladi."""
+        best, bt = None, None
+        for s in self.surf_list:
+            if s.x0 <= x <= s.x1:
+                i = s.idx(x)
+                if (s.vis is not None and not s.vis[i]) or not s.solid(i):
+                    continue
+                top = s.top_at(i)
+                ref = top + (s.prev_y - s.y)
+                if oy < max(top, ref) and y >= top and (bt is None or top < bt):
+                    best, bt = s, top
+        return best
+
     def update_chunks(self):
         S, W = self.S, self.W
         gp = self.ground_pile
+        t = self.t
         alive = []
         for c in self.chunks:
-            if (not c.dust and c.r > 2.6 * S and random.random() < 0.025
+            c.age += 1
+            oy = c.y
+            if (not c.dust and not c.soft and c.r > 2.6 * S and random.random() < 0.025
                     and len(alive) + len(self.chunks) < MAX_CHUNKS * 1.5):
                 # havoda katta qor bo'lagi yumshoq bo'laklarga ajraladi
                 k = random.choice((2, 3))
@@ -980,7 +1031,14 @@ class World:
                 if c.item is not None:
                     self.dead.append(c.item)
                 continue
-            if c.dust:
+            if c.soft:      # mayin: sekin, tebranib, shamolda suzib tushadi
+                c.vy += 0.18 * S
+                if c.vy > c.vmax:
+                    c.vy = c.vmax + (c.vy - c.vmax) * 0.8
+                c.vx *= 0.965
+                c.vx += math.sin(c.ph + t * 0.09) * 0.12 * S
+                c.ang += c.spin
+            elif c.dust:
                 c.vy += 0.18 * S
                 c.vx *= 0.96
                 c.vy *= 0.97
@@ -993,8 +1051,11 @@ class World:
                 c.x, c.vx = 0.0, abs(c.vx) * 0.3
             elif c.x > W:
                 c.x, c.vx = float(W), -abs(c.vx) * 0.3
-            if c.y + c.r * 0.5 >= gp.y - gp.height_at(c.x):
-                gp.add(c.x, c.r)               # sakramasdan qatlamga qo'shiladi
+            target = self.land_on(c.x, oy, c.y) if c.age > 8 else None
+            if target is None and c.y + c.r * 0.5 >= gp.y - gp.height_at(c.x):
+                target = gp
+            if target is not None:
+                target.add(c.x, c.r)               # sakramasdan qatlamga qo'shiladi
                 if c.item is not None:
                     self.dead.append(c.item)
                 continue
@@ -1079,10 +1140,7 @@ class World:
             got = p.take(x, 2 * p.col, area / n)
             if got < 2:
                 continue
-            r = math.sqrt(got / (math.pi * GAIN))
-            self.spawn_chunk(x, p.top_y_at(x) - r,
-                             vx0 + random.uniform(-1.5, 1.5) * S,
-                             vy0 + random.uniform(-0.5, 1.0) * S, r)
+            self._spawn_group(x, p.top_y_at(x), got, vx0, vy0, 0.0, 2 * p.col)
 
     def release_snow(self, p, vx=0.0, vy=0.0, stagger=0):
         """Sirtdagi butun qorni bo'laklarga aylantirib uchirib yuboradi va sirtni tozalaydi.
@@ -1113,18 +1171,15 @@ class World:
 
     def _spawn_group(self, xc, ty, area, vx, vy, lift, width):
         S = self.S
-        pieces = int(area / (math.pi * GAIN * (5 * S) ** 2)) + 1
-        r = math.sqrt(area / pieces / (math.pi * GAIN))
-        for _ in range(pieces):
-            self.spawn_chunk(xc + random.uniform(-width / 2, width / 2), ty - r,
-                             vx * random.uniform(0.6, 1.25) + random.uniform(-1.5, 1.5) * S,
-                             vy * 0.5 - random.uniform(0.2, 1.0) * lift
-                             + random.uniform(-0.3, 1.0) * S, r)
-        for _ in range(2 if lift > 1 else 1):
-            self.spawn_chunk(xc, ty - S, vx * random.uniform(0.7, 1.4)
-                             + random.uniform(-2, 2) * S,
-                             vy * 0.4 - random.uniform(0.2, 1.2) * lift - S,
-                             random.uniform(0.6, 1.2) * S, dust=True)
+        n = max(1, min(16, int(area / 22) + 1))
+        r0 = math.sqrt(area / n / (math.pi * GAIN))
+        for _ in range(n):
+            r = min(2.4 * S, max(0.7 * S, r0 * random.uniform(0.75, 1.25)))
+            self.spawn_soft(xc + random.uniform(-width / 2, width / 2),
+                            ty - r + random.uniform(0, 3 * S),
+                            vx * random.uniform(0.6, 1.25) + random.uniform(-1.2, 1.2) * S,
+                            vy * 0.5 - random.uniform(0.2, 1.0) * lift
+                            + random.uniform(-0.3, 0.8) * S, r)
 
     def burst_pile(self, p, mx):
         S = self.S
@@ -1528,9 +1583,17 @@ class World:
             self.surfaces[key] = s
         else:
             dx, dy = x0 - s.x0, y - s.y
-            if abs(dx) > 3 * S or abs(dy) > 3 * S:     # siljitildi: qor sachrab uchadi
-                self.release_snow(s, max(-28 * S, min(28 * S, dx / 2.0)),
-                                  max(-12 * S, min(12 * S, dy / 2.0)))
+            if abs(dx) > 3 * S or abs(dy) > 3 * S:
+                s.still = 0
+                if not s.moving:        # siljish boshlandi: qor sachrab uchadi
+                    s.moving = True
+                    self.release_snow(s, max(-28 * S, min(28 * S, dx / 2.0)),
+                                      max(-12 * S, min(12 * S, dy / 2.0)))
+                # siljish davom etayotganda tushgan yangi qor oynada qoladi (ushlab olish)
+            else:
+                s.still += 1
+                if s.still >= 6:
+                    s.moving = False
             s.move(x0, x1, y)
         if kind == "win" and (s.base is None or len(s.base) != len(s.h)):
             s.set_corners(7 * S)
@@ -1778,7 +1841,13 @@ class App:
 
         for ch in w.chunks:
             r = ch.r
-            if ch.dust:
+            if ch.soft:
+                pts = rot(ch.shape, ch.ang, ch.x, ch.y, r)
+                if ch.item is None:
+                    ch.item = c.create_polygon(*pts, fill=FLAKE_FILL[ch.tier], outline="")
+                else:
+                    c.coords(ch.item, *pts)
+            elif ch.dust:
                 if ch.item is None:
                     ch.item = c.create_oval(0, 0, 0, 0, fill="#f4f9ff", outline="")
                 c.coords(ch.item, ch.x - r, ch.y - r, ch.x + r, ch.y + r)
