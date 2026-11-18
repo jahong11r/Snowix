@@ -2,17 +2,18 @@
 """
 ❄ Yangi yil qori — realistik qor simulyatsiyasi (Windows)
 
-  * Turli o'lchamdagi yumshoq qor zarrachalari, shamol va chuqurlik (uzoq/yaqin).
-  * Qor yerda, ochiq oynalarning tepasida va ish stoli ikonkalari ustida to'planadi.
-  * Oyna siljitilsa qor u bilan birga ketadi; pastga tushirilsa yoki yopilsa
-    qor bo'shashib to'kiladi.
+  * Mayda, shakli notekis qor zarralari (uzoq/yaqin qatlamlar, shamol).
+  * Qor yerda, ochiq oynalar tepasida va ish stoli ikonkalari ustida to'planadi.
+    Ikonkadagi qor ikonka shakliga moslashadi.
+  * Oyna yoki ikonka siljitilsa, ustidagi qor sirpanib tushadi va pastdagi qorga
+    sakramasdan qo'shiladi.
   * Chap tugma: qorni sudrab sharcha yasash, ko'tarish, otish.
-  * Sharcha qattiq urilsa mayda bo'laklarga ajraladi.
-  * 3 ta sharcha ustma-ust = qorbobo.
-  * O'ng tugma: qorbobo, sharcha yoki qor uyumi ustida bosilsa parchalanadi.
+  * Sharcha qattiq urilsa bo'laklarga ajraladi. 3 ta sharcha = qorbobo.
+  * O'ng tugma: qorbobo, sharcha yoki qor uyumini parchalaydi.
+  * Tepada realistik Yangi yil chiroqlari.
 
 Ishga tushirish:  python qor.py
-Xato bo'lsa:  Foydalanuvchi papkasidagi qor_xato.txt faylga yoziladi.
+Xato yoki ma'lumot:  foydalanuvchi papkasidagi qor_xato.txt va qor_log.txt
 """
 import ctypes
 import math
@@ -24,35 +25,52 @@ import tkinter as tk
 KEY = "#010203"          # shaffof qilinadigan rang
 WHITE = "#ffffff"
 EDGE = "#b7d1ec"
+PILE_BODY = "#e4eef9"
 GRAVITY = 0.6
 MAX_BALL = 56
-GAIN = 1.8               # qor parchasi maydoni -> qatlam maydoni
+GAIN = 4.2               # qor parchasi maydoni -> qatlam maydoni
 BALL_GAIN = 4.0          # sharcha maydoni = olingan qor maydoni * BALL_GAIN
 MAX_CHUNKS = 420
 APP_NAME = "YangiYilQori"
-LIGHT_ON = ["#ff3b3b", "#ffd23b", "#3bff6b", "#3bb6ff", "#ff6bd6"]
-LIGHT_OFF = ["#7a1d1d", "#7a6a1d", "#1d7a33", "#1d587a", "#7a1d66"]
-FLAKE_FILL = ["#d7e5f5", "#e4eef9", "#f2f7fc", "#ffffff"]
-FLAKE_EDGE = ["#d7e5f5", "#cfdff1", "#c6d9ee", "#c0d4ec"]
-HALO = "#f0f6fc"
+FLAKE_FILL = ["#c3d4e7", "#dae7f4", "#eef5fb", "#ffffff"]
+BULBS = [("#ff2a2a", "#3d0c0c"), ("#ffb02e", "#3d2a0c"), ("#3dff6e", "#0c3d1a"),
+         ("#38b6ff", "#0c2a3d"), ("#ff5fd2", "#3d0c31"), ("#ffe94a", "#3d390c")]
 SKIP_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
                 "Windows.UI.Core.CoreWindow", "NotifyIconOverflowWindow")
 
 _errs = 0
+_logs = 0
+
+
+def _write(name, text):
+    try:
+        p = os.path.join(os.path.expanduser("~"), name)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(text + "\n")
+    except Exception:
+        pass
 
 
 def log_error():
     global _errs
     _errs += 1
-    if _errs > 5:
-        return
-    try:
+    if _errs <= 5:
         import traceback
-        p = os.path.join(os.path.expanduser("~"), "qor_xato.txt")
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(traceback.format_exc() + "\n")
-    except Exception:
-        pass
+        _write("qor_xato.txt", traceback.format_exc())
+
+
+def log_info(msg):
+    global _logs
+    _logs += 1
+    if _logs <= 25:
+        _write("qor_log.txt", msg)
+
+
+def blend(c1, c2, t):
+    t = max(0.0, min(1.0, t))
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
 # =====================================================================
@@ -75,6 +93,15 @@ class POINT(ctypes.Structure):
 class RECT(ctypes.Structure):
     _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
                 ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long), ("biPlanes", ctypes.c_uint16),
+                ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", ctypes.c_uint32),
+                ("biClrImportant", ctypes.c_uint32)]
 
 
 def cursor_pos():
@@ -128,10 +155,17 @@ def autostart_set(on):
         pass
 
 
+_api_ready = False
+
+
 def setup_api():
     """ctypes funksiyalari uchun to'g'ri turlarni o'rnatadi (64-bit uchun muhim)."""
+    global _api_ready
     from ctypes import wintypes
     u = ctypes.windll.user32
+    d = ctypes.windll.dwmapi
+    if _api_ready:
+        return u, d
     u.IsWindowVisible.argtypes = [wintypes.HWND]
     u.IsIconic.argtypes = [wintypes.HWND]
     u.IsZoomed.argtypes = [wintypes.HWND]
@@ -154,10 +188,99 @@ def setup_api():
     u.SendMessageW.restype = ctypes.c_ssize_t
     u.ClientToScreen.argtypes = [wintypes.HWND, ctypes.c_void_p]
     u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
-    d = ctypes.windll.dwmapi
+    u.GetDC.argtypes = [wintypes.HWND]
+    u.GetDC.restype = ctypes.c_void_p
+    u.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
     d.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
                                         ctypes.c_void_p, wintypes.DWORD]
+    g = ctypes.windll.gdi32
+    g.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    g.CreateCompatibleDC.restype = ctypes.c_void_p
+    g.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    g.CreateCompatibleBitmap.restype = ctypes.c_void_p
+    g.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    g.SelectObject.restype = ctypes.c_void_p
+    g.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                         ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                         wintypes.DWORD]
+    g.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+                            ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p,
+                            ctypes.c_uint]
+    g.DeleteObject.argtypes = [ctypes.c_void_p]
+    g.DeleteDC.argtypes = [ctypes.c_void_p]
+    _api_ready = True
     return u, d
+
+
+def grab_screen(x, y, w, h):
+    """Ekranning (x,y,w,h) qismini BGRA baytlar sifatida oladi (qor oynasisiz)."""
+    u = ctypes.windll.user32
+    g = ctypes.windll.gdi32
+    hdc = u.GetDC(None)
+    if not hdc:
+        return None
+    try:
+        mdc = g.CreateCompatibleDC(hdc)
+        bmp = g.CreateCompatibleBitmap(hdc, w, h)
+        old = g.SelectObject(mdc, bmp)
+        ok = g.BitBlt(mdc, 0, 0, w, h, hdc, x, y, 0x00CC0020)   # SRCCOPY
+        bi = BITMAPINFOHEADER()
+        bi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bi.biWidth, bi.biHeight = w, -h
+        bi.biPlanes, bi.biBitCount = 1, 32
+        buf = ctypes.create_string_buffer(w * h * 4)
+        g.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+        g.SelectObject(mdc, old)
+        g.DeleteObject(bmp)
+        g.DeleteDC(mdc)
+        return buf.raw if ok else None
+    finally:
+        u.ReleaseDC(None, hdc)
+
+
+def compute_profile(buf, w, h_total, margin, thresh=42):
+    """Ikonka siluetining yuqori chegarasi.
+    buf — BGRA baytlar (yuqoridan pastga), tepada `margin` qator ikonkadan tashqarida.
+    Har bir ustunda keskin rang sakrashi (ikonka cheti) qidiriladi; fon gradienti
+    sekin o'zgargani uchun xalaqit bermaydi.
+    Qaytaradi: har bir ustun uchun ikonka tepasidan masofa (px) yoki None."""
+    rows = h_total - margin
+    limit = int(rows * 0.75)
+    prof = []
+    for x in range(w):
+        found = None
+        streak = 0
+        for r in range(limit):
+            i = ((margin + r) * w + x) * 4
+            j = ((margin + r - 2) * w + x) * 4
+            d = abs(buf[i] - buf[j]) + abs(buf[i + 1] - buf[j + 1]) + abs(buf[i + 2] - buf[j + 2])
+            if d > thresh:
+                streak += 1
+                if streak >= 2:
+                    found = max(0, r - 1)
+                    break
+            else:
+                streak = 0
+        prof.append(found)
+    out = []
+    for x in range(w):
+        win = [prof[j] for j in range(max(0, x - 2), min(w, x + 3))]
+        vals = sorted(v for v in win if v is not None)
+        if len(vals) * 2 <= len(win):
+            out.append(None)
+        else:
+            out.append(vals[len(vals) // 2])
+    return out
+
+
+def profile_ok(prof):
+    solid = [p for p in prof if p is not None]
+    if len(solid) < 0.25 * len(prof):
+        return False
+    flat = sum(1 for p in solid if p <= 1)
+    if flat >= 0.85 * len(solid) and len(solid) > 0.9 * len(prof):
+        return False          # tanlangan (ko'k fon) ikonka — to'g'ri chegara emas
+    return True
 
 
 class WinScanner:
@@ -222,12 +345,16 @@ class WinScanner:
 
 
 class DesktopIcons:
-    """Ish stoli ikonkalari joylashuvini explorer.exe dan o'qiydi."""
+    """Ish stoli ikonkalari joylashuvi va siluetini o'qiydi."""
 
-    def __init__(self, S):
-        self.S = S
+    def __init__(self, S, W, H):
+        self.S, self.W, self.H = S, W, H
         self.ok = False
         self.lv = None
+        self.why = ""
+        self.cache = {}
+        self.nq = 0
+        self.logged = False
         try:
             self.u, _ = setup_api()
             from ctypes import wintypes
@@ -243,11 +370,13 @@ class DesktopIcons:
             k.ReadProcessMemory.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                             ctypes.c_void_p, ctypes.c_size_t,
                                             ctypes.c_void_p]
-            k.CloseHandle.argtypes = [ctypes.c_void_p]
             self.k = k
             self.find()
-        except Exception:
+        except Exception as e:
             self.ok = False
+            self.why = "boshlash xatosi: %r" % (e,)
+        if not self.ok:
+            log_info("Ikonkalar: o'qib bo'lmadi (%s)" % self.why)
 
     def find(self):
         u = self.u
@@ -265,28 +394,52 @@ class DesktopIcons:
                 if defview:
                     break
         if not defview:
+            self.why = "SHELLDLL_DefView topilmadi"
             return
         lv = u.FindWindowExW(defview, None, "SysListView32", None)
         if not lv:
+            self.why = "SysListView32 topilmadi"
             return
         pid = ctypes.c_ulong(0)
         u.GetWindowThreadProcessId(lv, ctypes.byref(pid))
         proc = self.k.OpenProcess(0x38, False, pid.value)   # VM_OPERATION|READ|WRITE
         if not proc:
+            self.why = "explorer jarayoniga kirib bo'lmadi"
             return
         remote = self.k.VirtualAllocEx(proc, None, 64, 0x3000, 0x04)
         if not remote:
+            self.why = "explorer xotirasini ajratib bo'lmadi"
             return
         self.lv, self.proc, self.remote = lv, proc, remote
         self.ok = True
 
-    def query(self):
-        """[(indeks, x0, y0, x1, y1)] — ikonka rasmi to'rtburchagi (ekran koordinatalarida)."""
+    def capture(self, l, t, r, b):
+        S = self.S
+        m = 4
+        w, h = int(r - l), int(b - t)
+        if w < 8 or h < 8 or w > 400 or h > 400:
+            return None
+        if l < 0 or t - m < 0 or r > self.W or b > self.H:
+            return None
+        buf = grab_screen(int(l), int(t - m), w, h + m)
+        if buf is None:
+            return None
+        prof = compute_profile(buf, w, h + m, m)
+        return prof if profile_ok(prof) else None
+
+    def query(self, covered, mouse):
+        """[(indeks, l, t, r, b, profil)] — ikonka rasmi to'rtburchagi va silueti."""
         if not self.ok:
-            self.find()
+            self.nq += 1
+            if self.nq % 25 == 1:
+                try:
+                    self.find()
+                except Exception:
+                    pass
             if not self.ok:
                 return []
         u, k, S = self.u, self.k, self.S
+        mx, my, down = mouse
         try:
             if not u.IsWindowVisible(self.lv):
                 return []
@@ -296,20 +449,46 @@ class DesktopIcons:
             org = POINT(0, 0)
             u.ClientToScreen(self.lv, ctypes.byref(org))
             out = []
+            captures = 0
+            self.nq += 1
             for i in range(count):
                 r = RECT(1, 0, 0, 0)                            # LVIR_ICON
                 k.WriteProcessMemory(self.proc, self.remote, ctypes.byref(r), 16, None)
-                if not u.SendMessageW(self.lv, 0x100E, i, self.remote):  # GETITEMRECT
+                if not u.SendMessageW(self.lv, 0x100E, i, self.remote):
                     continue
                 k.ReadProcessMemory(self.proc, self.remote, ctypes.byref(r), 16, None)
-                x0 = org.x + r.l + 6 * S
-                x1 = org.x + r.r - 6 * S
-                y0 = org.y + r.t + 3 * S
-                if x1 - x0 > 10 * S:
-                    out.append((i, x0, y0, x1, org.y + r.b))
+                l, t = org.x + r.l, org.y + r.t
+                rr, bb = org.x + r.r, org.y + r.b
+                if rr - l < 10 * S or rr < 0 or l > self.W:
+                    continue
+                key = (l, t, rr, bb)
+                ent = self.cache.get(i)
+                if ent is None or ent[0] != key:
+                    ent = [key, None, 0, self.nq]
+                    self.cache[i] = ent
+                want = ent[1] is None and ent[2] < 4 and self.nq >= ent[3]
+                if want and captures < 3 and not down:
+                    pts = ((l + 2, t + 2), (rr - 2, t + 2), ((l + rr) / 2, (t + bb) / 2),
+                           (l + 2, bb - 2), (rr - 2, bb - 2))
+                    near = (l - 12 * S <= mx <= rr + 12 * S and t - 12 * S <= my <= bb + 12 * S)
+                    state = u.SendMessageW(self.lv, 0x102C, i, 0x000B)   # SELECTED|FOCUSED|DROP
+                    if not near and not state and not any(covered(x, y) for x, y in pts):
+                        captures += 1
+                        prof = self.capture(l, t, rr, bb)
+                        if prof is not None:
+                            ent[1] = prof
+                        else:
+                            ent[2] += 1
+                            ent[3] = self.nq + 25
+                out.append((i, l, t, rr, bb, ent[1]))
+            if not self.logged and out:
+                self.logged = True
+                log_info("Ikonkalar topildi: %d ta" % len(out))
             return out
         except Exception:
             self.ok = False
+            self.why = "so'rov xatosi"
+            log_error()
             return []
 
 
@@ -325,23 +504,35 @@ def rot(pts, ang, cx, cy, k=1.0):
     return out
 
 
+def rough_shape(n_lo, n_hi, lo, hi, stretch=1.0):
+    n = random.randint(n_lo, n_hi)
+    pts = []
+    for k in range(n):
+        a = 6.283 * k / n + random.uniform(-0.45, 0.45)
+        rr = random.uniform(lo, hi)
+        pts.append((math.cos(a) * rr, math.sin(a) * rr * stretch))
+    return pts
+
+
 class Flake:
-    __slots__ = ("x", "y", "z", "tier", "r", "v", "ph", "fr", "wob", "halo",
-                 "item", "hitem")
+    __slots__ = ("x", "y", "z", "tier", "r", "v", "ph", "fr", "wob", "ang", "spin",
+                 "shape", "item")
 
     def __init__(self, W, H, S, anywhere=False):
-        self.item = self.hitem = None
+        self.item = None
         self.respawn(W, H, S, anywhere)
 
     def respawn(self, W, H, S, anywhere=False):
         z = random.random() ** 1.6          # ko'pchilik — mayda va uzoq
         self.z = z
         self.tier = int(z * 3.999)
-        self.r = (0.9 + 3.4 * z ** 1.3) * S
+        self.r = (0.55 + 1.9 * z ** 1.3) * S
         self.v = (1.0 + 2.4 * z) * S * random.uniform(0.9, 1.1)
         self.fr = random.uniform(0.02, 0.05)
         self.wob = random.uniform(0.25, 0.8)
-        self.halo = z > 0.72
+        self.ang = random.uniform(0, 6.28)
+        self.spin = random.uniform(-0.06, 0.06)
+        self.shape = rough_shape(4, 6, 0.6, 1.25, 1.0 + z * random.uniform(0.2, 1.2))
         self.x = random.uniform(0, W)
         self.y = random.uniform(0, H) if anywhere else random.uniform(-0.25 * H, -4)
         self.ph = random.uniform(0, 6.28)
@@ -349,13 +540,13 @@ class Flake:
 
 class Chunk:
     """Qor bo'lagi (sharcha parchasi, to'kilgan qor yoki chang)."""
-    __slots__ = ("x", "y", "vx", "vy", "r", "dust", "bounces", "item")
+    __slots__ = ("x", "y", "vx", "vy", "r", "dust", "item", "shape")
 
     def __init__(self, x, y, vx, vy, r, dust):
         self.x, self.y, self.vx, self.vy, self.r = x, y, vx, vy, r
         self.dust = dust
-        self.bounces = 0
         self.item = None
+        self.shape = None if dust else rough_shape(5, 7, 0.65, 1.2)
 
 
 class Part:
@@ -376,14 +567,16 @@ class Pile:
     """Bir sirtda (yer, oyna tepasi, ikonka) to'planadigan qor qatlami."""
     WEIGHTS = [6 - abs(d) for d in range(-5, 6)]
 
-    def __init__(self, x0, x1, y, col, maxh, slope, open_edges, S):
+    def __init__(self, x0, x1, y, col, maxh, slope, open_edges, S, noise_k=1.0):
         self.col, self.maxh, self.slope = col, maxh, slope
-        self.open, self.S = open_edges, S
+        self.open, self.S, self.noise_k = open_edges, S, noise_k
         self.active = True
         self.h = []
         self.noise = []
         self.vis = None
-        self.item = None
+        self.base = None          # ikonka silueti (har ustun uchun tepadan masofa yoki None)
+        self.prof_id = -1
+        self.item = self.item2 = None
         self.shown = True
         self.dirty = True
         self.x0 = self.x1 = self.y = None
@@ -404,6 +597,33 @@ class Pile:
             self.dirty = True
         self.x0, self.x1, self.y = x0, x1, y
 
+    def set_profile(self, profile, wpx):
+        S = self.S
+        if profile is None:        # standart: yumaloq ikonka shakli
+            hw = max(1.0, wpx / 2.0)
+            profile = []
+            for k in range(int(wpx) + 1):
+                u = max(-1.0, min(1.0, (k + 0.5 - hw) / hw))
+                profile.append(3 * S + (1 - math.sqrt(max(0.0, 1 - u * u))) * hw * 0.45)
+        base = []
+        for i in range(len(self.h)):
+            k = min(len(profile) - 1, int(i * self.col + self.col / 2.0))
+            p = profile[k]
+            base.append(None if p is None else float(p))
+        self.base = base
+        self.dirty = True
+
+    def solid(self, i):
+        return self.base is None or self.base[i] is not None
+
+    def surf_y(self, i):
+        if self.base is None or self.base[i] is None:
+            return self.y
+        return self.y + self.base[i]
+
+    def top_at(self, i):
+        return self.surf_y(i) - self.h[i]
+
     def idx(self, x):
         i = int((x - self.x0) // self.col)
         if i < 0:
@@ -414,6 +634,9 @@ class Pile:
 
     def height_at(self, x):
         return self.h[self.idx(x)]
+
+    def top_y_at(self, x):
+        return self.top_at(self.idx(x))
 
     def area(self):
         return sum(self.h) * self.col
@@ -426,7 +649,7 @@ class Pile:
         n = len(h)
         for k, w in enumerate(self.WEIGHTS):
             j = i + k - 5
-            if 0 <= j < n:
+            if 0 <= j < n and self.solid(j):
                 v = h[j] + total * w / sw
                 h[j] = v if v < self.maxh else self.maxh
         self.dirty = True
@@ -447,21 +670,39 @@ class Pile:
 
     def relax(self):
         h = self.h
+        n = len(h)
         lim = self.slope
+        base = self.base
         moved = False
-        for i in range(len(h) - 1):
-            d = h[i] - h[i + 1]
-            if d > lim:
-                m = (d - lim) * 0.35
-                h[i] -= m
-                h[i + 1] += m
+
+        def e(i):
+            b = base[i] if base is not None and base[i] is not None else 0.0
+            return h[i] - b
+
+        for i in range(n - 1):
+            si = self.solid(i)
+            sj = self.solid(i + 1)
+            if si and sj:
+                d = e(i) - e(i + 1)
+                if d > lim and h[i] > 0:
+                    m = min((d - lim) * 0.35, h[i])
+                    h[i] -= m
+                    h[i + 1] += m
+                    moved = True
+                elif d < -lim and h[i + 1] > 0:
+                    m = min((-d - lim) * 0.35, h[i + 1])
+                    h[i] += m
+                    h[i + 1] -= m
+                    moved = True
+                if h[i + 1] > self.maxh:
+                    h[i + 1] = self.maxh
+            elif si and h[i] > 0:          # qo'shni yo'q: qor sirpanib to'kiladi
+                h[i] *= 0.8
                 moved = True
-            elif d < -lim:
-                m = (-d - lim) * 0.35
-                h[i] += m
-                h[i + 1] -= m
+            elif sj and h[i + 1] > 0:
+                h[i + 1] *= 0.8
                 moved = True
-        if self.open:
+        if self.open and base is None:
             if h[0] > lim:
                 h[0] -= (h[0] - lim) * 0.3
                 moved = True
@@ -471,36 +712,70 @@ class Pile:
         if moved:
             self.dirty = True
 
+    def _tops(self):
+        """Har ustun uchun (x, qor yuzasi y, tayanch y)."""
+        y, col, S = self.y, self.col, self.S
+        h, nz, vis, base = self.h, self.noise, self.vis, self.base
+        n = len(h)
+        # tayanch chiziq: silueta bo'sh ustunlarda qo'shnidan olinadi
+        bb = []
+        last = None
+        if base is not None:
+            for b in base:
+                if b is not None:
+                    last = b
+                bb.append(last)
+            nxt = None
+            for i in range(n - 1, -1, -1):
+                if bb[i] is None:
+                    bb[i] = nxt if nxt is not None else 0.0
+                else:
+                    nxt = bb[i]
+        out = []
+        x = self.x0
+        for i in range(n):
+            by = y + (bb[i] if base is not None else 0.0)
+            if (vis is not None and not vis[i]) or (base is not None and base[i] is None):
+                v = 0.0
+            else:
+                v = h[i] + nz[i] * self.noise_k * min(1.0, h[i] / (5 * S))
+            out.append((x, by - v, by))
+            x += col
+        return out
+
     def points(self):
         y, col, S = self.y, self.col, self.S
-        h, nz, vis = self.h, self.noise, self.vis
-        n = len(h)
-
-        def hh(i):
-            if vis is not None and not vis[i]:
-                return 0.0
-            v = h[i]
-            return v + nz[i] * min(1.0, v / (5 * S))
-
+        t = self._tops()
+        if self.base is not None:
+            return ([c for (x, ty, by) in t for c in (x, ty)]
+                    + [c for (x, ty, by) in reversed(t) for c in (x, by)])
         pts = []
-        if self.open:      # oyna chetiga yopishib turgan qor
-            h0 = hh(0)
+        if self.open:
+            h0 = y - t[0][1]
             pts += [self.x0 - 2 * col, y + 5 * S, self.x0 - 2 * col, y - h0 * 0.25,
                     self.x0 - col, y - h0 * 0.6]
         else:
             pts += [self.x0, y + 3]
-        x = self.x0
-        for i in range(n):
-            pts += [x, y - hh(i)]
-            x += col
-        last = x - col
+        for (x, ty, by) in t:
+            pts += [x, ty]
+        last = t[-1][0]
         if self.open:
-            hl = hh(n - 1)
+            hl = y - t[-1][1]
             pts += [last + col, y - hl * 0.6, last + 2 * col, y - hl * 0.25,
                     last + 2 * col, y + 5 * S]
         else:
             pts += [last, y + 3]
         return pts
+
+    def crust(self):
+        """Qorning ustki oq qatlami (hajm ko'rinishi uchun)."""
+        S = self.S
+        t = self._tops()
+        top = [c for (x, ty, by) in t for c in (x, ty)]
+        low = []
+        for (x, ty, by) in reversed(t):
+            low += [x, ty + min((by - ty) * 0.55, 2.6 * S) + 0.5]
+        return top + low
 
     def clear(self):
         self.h = [0.0] * len(self.h)
@@ -578,7 +853,8 @@ class World:
                     s.relax()
         if t % 15 == 0:      # to'lib ketgan qor ba'zan o'zi sirpanib tushadi
             for s in self.surf_list:
-                if max(s.h) >= 0.85 * s.maxh and random.random() < 0.12:
+                if s.maxh >= 12 * self.S and max(s.h) >= 0.85 * s.maxh \
+                        and random.random() < 0.12:
                     self.shed(s, 0.25, maxn=5)
 
     def clear(self):
@@ -609,6 +885,7 @@ class World:
             oy = f.y
             f.y += f.v
             f.x += (wind * (0.4 + 0.8 * f.z) + math.sin(f.ph + t * f.fr) * f.wob) * S
+            f.ang += f.spin
             if f.x < 0:
                 f.x += W
             elif f.x >= W:
@@ -618,9 +895,9 @@ class World:
             for s in surfs:
                 if s.x0 <= f.x <= s.x1:
                     i = s.idx(f.x)
-                    if s.vis is not None and not s.vis[i]:
+                    if (s.vis is not None and not s.vis[i]) or not s.solid(i):
                         continue
-                    top = s.y - s.h[i]
+                    top = s.top_at(i)
                     if oy < top <= f.y and (besttop is None or top < besttop):
                         landed, besttop = s, top
             if landed is None and f.y >= gp.y - gp.height_at(f.x):
@@ -629,7 +906,8 @@ class World:
                 landed.add(f.x, f.r)
                 if extra > 0:
                     extra -= 1
-                    self.kill_flake(f)
+                    if f.item is not None:
+                        self.dead.append(f.item)
                     continue
                 f.respawn(W, H, S)
             alive.append(f)
@@ -637,15 +915,10 @@ class World:
             alive.append(Flake(W, H, S, False))
         if len(alive) > target and target > 0:
             for f in alive[target:]:
-                self.kill_flake(f)
+                if f.item is not None:
+                    self.dead.append(f.item)
             alive = alive[:target]
         self.flakes = alive
-
-    def kill_flake(self, f):
-        if f.item is not None:
-            self.dead.append(f.item)
-        if f.hitem is not None:
-            self.dead.append(f.hitem)
 
     # ---------------- bo'laklar (chunk) ----------------
     def spawn_chunk(self, x, y, vx, vy, r, dust=False):
@@ -666,25 +939,18 @@ class World:
                 c.vy *= 0.97
             else:
                 c.vy += GRAVITY * S * 0.9
-                c.vx *= 0.995
+                c.vx *= 0.99
             c.x += c.vx
             c.y += c.vy
             if c.x < 0:
-                c.x, c.vx = 0.0, abs(c.vx) * 0.4
+                c.x, c.vx = 0.0, abs(c.vx) * 0.3
             elif c.x > W:
-                c.x, c.vx = float(W), -abs(c.vx) * 0.4
-            surf = gp.y - gp.height_at(c.x)
-            if c.y + c.r >= surf:
-                if (not c.dust) and c.vy > 3 * S and c.bounces < 2:
-                    c.y = surf - c.r
-                    c.vy = -c.vy * 0.3
-                    c.vx *= 0.65
-                    c.bounces += 1
-                else:
-                    gp.add(c.x, c.r)
-                    if c.item is not None:
-                        self.dead.append(c.item)
-                    continue
+                c.x, c.vx = float(W), -abs(c.vx) * 0.3
+            if c.y + c.r * 0.5 >= gp.y - gp.height_at(c.x):
+                gp.add(c.x, c.r)               # sakramasdan qatlamga qo'shiladi
+                if c.item is not None:
+                    self.dead.append(c.item)
+                continue
             alive.append(c)
         self.chunks = alive
 
@@ -721,7 +987,7 @@ class World:
                 dx, dy = dx / ln, dy / ln
             sp = random.uniform(0.3, 1.2) * vscale * 1.1
             self.spawn_chunk(px, py, bias[0] + dx * sp, bias[1] + dy * sp - S,
-                             random.uniform(0.7, 1.5) * S, dust=True)
+                             random.uniform(0.6, 1.3) * S, dust=True)
 
     def shatter_ball(self, b, normal, speed):
         S = self.S
@@ -767,9 +1033,29 @@ class World:
             if got < 2:
                 continue
             r = math.sqrt(got / (math.pi * GAIN))
-            self.spawn_chunk(x, p.y - p.height_at(x) - r,
+            self.spawn_chunk(x, p.top_y_at(x) - r,
                              vx0 + random.uniform(-1.5, 1.5) * S,
                              vy0 + random.uniform(-0.5, 1.0) * S, r)
+
+    def slide_off(self, p, vx0, vy0):
+        """Sirt siljiganda butun qor sirpanib tushadi va sirt tozalanadi."""
+        S = self.S
+        cols = len(p.h)
+        g = 4
+        for j in range(0, cols, g):
+            area = sum(p.h[j:j + g]) * p.col
+            if area >= 3:
+                xc = p.x0 + (j + g / 2.0) * p.col
+                pieces = int(area / (math.pi * GAIN * (5 * S) ** 2)) + 1
+                r = math.sqrt(area / pieces / (math.pi * GAIN))
+                ty = p.top_y_at(xc)
+                for _ in range(pieces):
+                    self.spawn_chunk(xc + random.uniform(-g, g) * p.col * 0.5, ty - r,
+                                     vx0 + random.uniform(-1, 1) * S,
+                                     vy0 + random.uniform(0, 1.2) * S, r)
+            for k in range(j, min(j + g, cols)):
+                p.h[k] = 0.0
+        p.dirty = True
 
     def burst_pile(self, p, mx):
         S = self.S
@@ -791,17 +1077,17 @@ class World:
                 xc = p.x0 + (j + 1) * p.col
                 pieces = int(area / (math.pi * GAIN * (6 * S) ** 2)) + 1
                 r = math.sqrt(area / pieces / (math.pi * GAIN))
+                ty = p.top_y_at(xc)
                 for _ in range(pieces):
                     self.spawn_chunk(
-                        xc + random.uniform(-p.col, p.col),
-                        p.y - p.height_at(xc) - r,
+                        xc + random.uniform(-p.col, p.col), ty - r,
                         (xc - mx) / R * 6 * S + random.uniform(-1.5, 1.5) * S,
                         -random.uniform(2.5, 8.5) * S, r)
                 for _ in range(2):
-                    self.spawn_chunk(xc, p.y - p.height_at(xc) - S,
+                    self.spawn_chunk(xc, ty - S,
                                      (xc - mx) / R * 5 * S + random.uniform(-2, 2) * S,
                                      -random.uniform(2, 7) * S,
-                                     random.uniform(0.7, 1.4) * S, dust=True)
+                                     random.uniform(0.6, 1.2) * S, dust=True)
             j += 3
         p.dirty = True
 
@@ -906,10 +1192,9 @@ class World:
         for s in self.surf_list:
             if s.x0 <= mx <= s.x1:
                 i = s.idx(mx)
-                if s.vis is not None and not s.vis[i]:
+                if (s.vis is not None and not s.vis[i]) or not s.solid(i):
                     continue
-                h = s.h[i]
-                if h >= 2.5 * S and s.y - h - 4 * S <= my <= s.y + 2 * S:
+                if s.h[i] >= 2.5 * S and s.top_at(i) - 4 * S <= my <= s.surf_y(i) + 2 * S:
                     return ("pile", s)
         gp = self.ground_pile
         if 0 <= mx < self.W and my <= gp.y:
@@ -1139,47 +1424,47 @@ class World:
     # ---------------- oyna va ikonkalar ustidagi qor ----------------
     def set_surfaces(self, wins, icons):
         """wins: [(key,x0,y0,x1,y1,pile_ok)] z-tartibda (tepadan pastga).
-        icons: [(indeks,x0,y0,x1,y1)] (y0 — qor yotadigan chiziq)."""
-        S = self.S
+        icons: [(indeks,x0,y0,x1,y1,profil)] — y0 ikonka rasmining tepasi."""
         seen = set()
         higher = []
         for key, x0, y0, x1, y1, ok in wins:
             if ok:
                 k = ("w", key)
                 seen.add(k)
-                self._upd_surface(k, "win", x0, x1, y0, higher)
+                self._upd_surface(k, "win", x0, x1, y0, higher, None)
             higher.append((x0, y0, x1, y1))
-        for key, x0, y0, x1, y1 in icons:
+        for key, x0, y0, x1, y1, prof in icons:
             k = ("i", key)
             seen.add(k)
-            self._upd_surface(k, "icon", x0, x1, y0, higher)
+            self._upd_surface(k, "icon", x0, x1, y0, higher, prof)
         for k in list(self.surfaces):
             if k not in seen:
                 s = self.surfaces.pop(k)
-                self.shed(s, 1.0, maxn=40)      # qor bo'shashib to'kiladi
-                if s.item is not None:
-                    self.dead.append(s.item)
+                self.slide_off(s, 0.0, 0.0)      # qor bo'shashib to'kiladi
+                for it in (s.item, s.item2):
+                    if it is not None:
+                        self.dead.append(it)
         self.surf_list = [s for s in self.surfaces.values() if s.active]
 
-    def _upd_surface(self, key, kind, x0, x1, y, higher):
+    def _upd_surface(self, key, kind, x0, x1, y, higher, profile):
         S = self.S
         s = self.surfaces.get(key)
         if s is None:
             if kind == "win":
                 s = Pile(x0, x1, y, self.col, 24 * S, self.slope, True, S)
             else:
-                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 7 * S, 1.4 * S, True, S)
+                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 7 * S, 1.4 * S, True, S, 0.35)
             self.surfaces[key] = s
         else:
             dx, dy = x0 - s.x0, y - s.y
-            if dy > 4 * S:                      # pastga tushirildi — qor to'kiladi
-                self.shed(s, min(0.6, dy / (70 * S)), vx0=dx * 0.15, vy0=dy * 0.5)
-            elif dy < -45 * S:                  # keskin yuqoriga otildi
-                self.shed(s, 0.3, vx0=dx * 0.15, vy0=dy * 0.5)
-            if abs(dx) > 8 * S:                 # yon tomonga tez siljidi
-                self.shed(s, min(0.35, abs(dx) / (160 * S)), vx0=-dx * 0.25,
-                          edge="L" if dx > 0 else "R", maxn=6)
+            if abs(dx) > 3 * S or abs(dy) > 3 * S:     # siljitildi: qor sirpanib tushadi
+                self.slide_off(s, max(-6 * S, min(6 * S, dx * 0.3)),
+                               max(0.0, min(8 * S, dy * 0.3)))
             s.move(x0, x1, y)
+        if kind == "icon":
+            if s.prof_id != id(profile) or s.base is None or len(s.base) != len(s.h):
+                s.set_profile(profile, x1 - x0)
+                s.prof_id = id(profile)
         s.vis = self._vis(s, higher)
         s.active = s.vis is None or any(s.vis)
 
@@ -1203,6 +1488,10 @@ class World:
 # =====================================================================
 #  Ilova: oynalar va chizish
 # =====================================================================
+class Bulb:
+    __slots__ = ("body", "neck", "hl", "g1", "g2", "col", "ph", "s1", "s2")
+
+
 class App:
     def __init__(self):
         dpi_aware()
@@ -1231,14 +1520,19 @@ class App:
         root.update()
 
         self.world = World(self.W, self.H, self.ground, S)
-        self.gp_item = self.canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE,
-                                                  outline=EDGE, width=2, tags="pile")
+        gp = self.world.ground_pile
+        gp.item = self.canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=PILE_BODY,
+                                             outline="", tags="pile")
+        gp.item2 = self.canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE,
+                                              outline="", tags="pile")
         self.sm_sig = None
         self.lights_on = tk.BooleanVar(value=True)
         self.snow_var = tk.BooleanVar(value=True)
         self.auto_var = tk.BooleanVar(value=autostart_get())
         self.win_snow = tk.BooleanVar(value=True)
         self.icon_snow = tk.BooleanVar(value=True)
+        self.bulbs = []
+        self.lights_built = False
 
         self.hwnd = None
         self.click_through = False
@@ -1246,8 +1540,10 @@ class App:
         self.set_click_through(True)
 
         self.scanner = WinScanner(self.hwnd, S)
-        self.icon_reader = DesktopIcons(S)
+        self.icon_reader = DesktopIcons(S, self.W, self.H)
         self.icons = []
+        self.last_wins = []
+        self.mouse = (-1, -1, False)
         self.refresh_n = 0
 
         self.panel = self.build_panel()
@@ -1299,8 +1595,8 @@ class App:
             "O'ng tugma: qorbobo, sharcha yoki qor uyumi ustida bosing — "
             "parchalanadi.\n\n"
             "Qor shu oynaning tepasida, boshqa oynalar va ish stoli "
-            "ikonkalari ustida ham to'planadi. Oynani pastga tushirsangiz "
-            "qor to'kiladi."
+            "ikonkalari ustida ham to'planadi. Oyna yoki ikonkani siljitsangiz "
+            "qor sirpanib tushadi."
         )
         tk.Label(p, text=help_text, justify="left", wraplength=int(315 * S),
                  bg=bg, fg="#cfe3ff", font=("Segoe UI", 9)).pack(padx=14, pady=6)
@@ -1343,12 +1639,20 @@ class App:
             pass
 
     # ---------- Asosiy sikl ----------
+    def covered(self, x, y):
+        for (k, a, b, c, d, ok) in self.last_wins:
+            if a <= x < c and b <= y < d:
+                return True
+        return False
+
     def refresh_surfaces(self):
         wins = self.scanner.scan(self.W, self.H, self.ground)
+        self.last_wins = wins
         if not self.win_snow.get():
             wins = [(k, a, b, c, d, False) for (k, a, b, c, d, ok) in wins]
         if self.refresh_n % 3 == 0:
-            self.icons = self.icon_reader.query() if self.icon_snow.get() else []
+            self.icons = (self.icon_reader.query(self.covered, self.mouse)
+                          if self.icon_snow.get() else [])
         self.refresh_n += 1
         self.world.set_surfaces(wins, self.icons)
 
@@ -1360,6 +1664,7 @@ class App:
                 rdown = button_down(0x02)
             except Exception:
                 mx, my, down, rdown = -1, -1, False, False
+            self.mouse = (mx, my, down)
             w = self.world
             if w.t % 2 == 0:
                 self.refresh_surfaces()
@@ -1377,6 +1682,16 @@ class App:
                 pass
 
     # ---------- Chizish ----------
+    def draw_sphere(self, x, y, r, tag):
+        c = self.canvas
+        c.create_oval(x - r, y - r, x + r, y + r, fill="#cddcec", outline="", tags=tag)
+        k = 0.95 * r
+        c.create_oval(x - 0.07 * r - k, y - 0.07 * r - k, x - 0.07 * r + k,
+                      y - 0.07 * r + k, fill="#e8f0f9", outline="", tags=tag)
+        k = 0.78 * r
+        c.create_oval(x - 0.15 * r - k, y - 0.17 * r - k, x - 0.15 * r + k,
+                      y - 0.17 * r + k, fill=WHITE, outline="", tags=tag)
+
     def draw(self):
         c, w = self.canvas, self.world
         for it in w.dead:
@@ -1384,53 +1699,50 @@ class App:
         w.dead.clear()
 
         for f in w.flakes:
-            r = f.r
+            pts = rot(f.shape, f.ang, f.x, f.y, f.r)
             if f.item is None:
-                if f.halo:
-                    f.hitem = c.create_oval(0, 0, 0, 0, fill=HALO, outline="")
-                f.item = c.create_oval(0, 0, 0, 0, fill=FLAKE_FILL[f.tier],
-                                       outline=FLAKE_EDGE[f.tier])
-            if f.hitem is not None:
-                hr = r * 1.9
-                c.coords(f.hitem, f.x - hr, f.y - hr, f.x + hr, f.y + hr)
-            c.coords(f.item, f.x - r, f.y - r, f.x + r, f.y + r)
+                f.item = c.create_polygon(*pts, fill=FLAKE_FILL[f.tier], outline="")
+            else:
+                c.coords(f.item, *pts)
 
         for ch in w.chunks:
             r = ch.r
-            if ch.item is None:
-                if ch.dust:
-                    ch.item = c.create_oval(0, 0, 0, 0, fill="#f4f9ff", outline="#d3e4f6")
+            if ch.dust:
+                if ch.item is None:
+                    ch.item = c.create_oval(0, 0, 0, 0, fill="#f4f9ff", outline="")
+                c.coords(ch.item, ch.x - r, ch.y - r, ch.x + r, ch.y + r)
+            else:
+                pts = rot(ch.shape, 0.0, ch.x, ch.y, r)
+                if ch.item is None:
+                    ch.item = c.create_polygon(*pts, fill=WHITE, outline="")
                 else:
-                    ch.item = c.create_oval(0, 0, 0, 0, fill=WHITE, outline=EDGE)
-            c.coords(ch.item, ch.x - r, ch.y - r, ch.x + r, ch.y + r)
+                    c.coords(ch.item, *pts)
 
         gp = w.ground_pile
-        if gp.dirty and w.t % 3 == 0:
-            c.coords(self.gp_item, *gp.points())
-            gp.dirty = False
-        for s in w.surfaces.values():
-            show = s.active and max(s.h) > 0.4
-            if s.item is None:
-                s.item = c.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE, outline=EDGE,
-                                          width=1 if s.maxh < 12 * self.S else 2,
+        for p in [gp] + list(w.surfaces.values()):
+            is_g = p is gp
+            show = True if is_g else (p.active and max(p.h) > 0.4)
+            if p.item is None:
+                p.item = c.create_polygon(0, 0, 0, 0, 0, 0, fill=PILE_BODY, outline="",
                                           tags="pile", state="hidden")
-                s.shown = False
-            if show != s.shown:
-                c.itemconfigure(s.item, state="normal" if show else "hidden")
-                s.shown = show
-                s.dirty = True
-            if show and s.dirty:
-                c.coords(s.item, *s.points())
-                s.dirty = False
+                p.item2 = c.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE, outline="",
+                                           tags="pile", state="hidden")
+                p.shown = False
+                p.dirty = True
+            if show != p.shown:
+                st = "normal" if show else "hidden"
+                c.itemconfigure(p.item, state=st)
+                c.itemconfigure(p.item2, state=st)
+                p.shown = show
+                p.dirty = True
+            if show and p.dirty and (not is_g or w.t % 3 == 0):
+                c.coords(p.item, *p.points())
+                c.coords(p.item2, *p.crust())
+                p.dirty = False
 
         c.delete("ball")
         for b in w.balls:
-            r = b.r
-            c.create_oval(b.x - r, b.y - r, b.x + r, b.y + r, fill=WHITE,
-                          outline=EDGE, width=2, tags="ball")
-            c.create_arc(b.x - r + 3, b.y - r + 3, b.x + r - 3, b.y + r - 3,
-                         start=-70, extent=110, style="arc", outline="#dbe9f8",
-                         width=max(2, int(r * 0.18)), tags="ball")
+            self.draw_sphere(b.x, b.y, b.r, "ball")
 
         c.delete("part")
         for p in w.parts:
@@ -1444,10 +1756,14 @@ class App:
             self.sm_sig = sig
 
         if self.lights_on.get():
-            if w.t % 6 == 0:
-                self.draw_lights()
-        else:
+            if not self.lights_built:
+                self.build_lights()
+            if w.t % 3 == 0:
+                self.update_lights()
+        elif self.lights_built:
             c.delete("lights")
+            self.bulbs = []
+            self.lights_built = False
 
         c.tag_lower("ball")
         c.tag_lower("part")
@@ -1461,18 +1777,18 @@ class App:
         if p.kind == "hat":
             c.create_polygon(rot([(-0.88 * s, 0.45 * s), (0.88 * s, 0.45 * s),
                                   (0.75 * s, -0.85 * s)], a, x, y, k),
-                             fill="#d62828", outline="#9d1c1c", width=2, tags="part")
+                             fill="#d62828", outline="", tags="part")
             c.create_polygon(rot([(-0.95 * s, 0.28 * s), (0.95 * s, 0.28 * s),
                                   (0.95 * s, 0.62 * s), (-0.95 * s, 0.62 * s)],
-                                 a, x, y, k), fill=WHITE, outline=EDGE, tags="part")
+                                 a, x, y, k), fill=WHITE, outline="", tags="part")
             px, py = rot([(0.75 * s, -0.85 * s)], a, x, y, k)
             rr = 0.22 * s * k
             c.create_oval(px - rr, py - rr, px + rr, py + rr, fill=WHITE,
-                          outline=EDGE, tags="part")
+                          outline="", tags="part")
         elif p.kind == "nose":
             c.create_polygon(rot([(-0.5 * s, -0.09 * s), (-0.5 * s, 0.09 * s),
                                   (0.5 * s, 0)], a, x, y, k),
-                             fill="#ff8a1f", outline="#c85f00", tags="part")
+                             fill="#ff8a1f", outline="", tags="part")
         elif p.kind == "stick":
             c.create_line(*rot([(-0.5 * s, 0), (0.5 * s, 0)], a, x, y, k), width=w * k,
                           fill="#6b4423", capstyle="round", tags="part")
@@ -1482,7 +1798,7 @@ class App:
         elif p.kind == "scarf":
             c.create_polygon(rot([(-0.5 * s, -w / 2), (0.5 * s, -w / 2),
                                   (0.5 * s, w / 2), (-0.5 * s, w / 2)], a, x, y, k),
-                             fill="#2e9e4f", outline="#1f7a3a", tags="part")
+                             fill="#2e9e4f", outline="", tags="part")
         else:
             rr = max(1.0, w * k)
             c.create_oval(x - rr, y - rr, x + rr, y + rr, fill="#222222",
@@ -1500,8 +1816,7 @@ class App:
         y2 = y1 - (r1 + r2) * 0.82
         for k, (yy, rr) in enumerate(((y0, r0), (y1, r1), (y2, r2))):
             if k not in gone:
-                c.create_oval(x - rr, yy - rr, x + rr, yy + rr, fill=WHITE,
-                              outline=EDGE, width=2, tags="snowman")
+                self.draw_sphere(x, yy, rr, "snowman")
 
         def dot(px, py, rad, color):
             c.create_oval(px - rad, py - rad, px + rad, py + rad, fill=color,
@@ -1516,7 +1831,7 @@ class App:
         if head and age >= 12:
             c.create_polygon(x, y2 - 0.05 * r2, x, y2 + 0.17 * r2,
                              x + 0.95 * r2, y2 + 0.09 * r2, fill="#ff8a1f",
-                             outline="#c85f00", tags="snowman")
+                             outline="", tags="snowman")
         if head and age >= 16:
             for k in range(-2, 3):
                 dot(x + k * 0.15 * r2, y2 + (0.40 + 0.06 * (2 - abs(k))) * r2,
@@ -1530,7 +1845,7 @@ class App:
             c.create_line(x - 0.8 * r2, ny, x + 0.8 * r2, ny, width=wd, fill="#2e9e4f",
                           capstyle="round", tags="snowman")
             c.create_rectangle(x + 0.25 * r2, ny, x + 0.25 * r2 + wd, ny + 0.9 * r1,
-                               fill="#2e9e4f", outline="#1f7a3a", tags="snowman")
+                               fill="#2e9e4f", outline="", tags="snowman")
         if mid and age >= 32:
             aw = max(3 * S, 0.1 * r1)
             for sign in (-1, 1):
@@ -1547,39 +1862,90 @@ class App:
             hb = y2 - r2 * 0.62
             tipx, tipy = x + 0.75 * r2, hb - 1.3 * r2
             c.create_polygon(x - 0.88 * r2, hb, x + 0.88 * r2, hb, tipx, tipy,
-                             fill="#d62828", outline="#9d1c1c", width=2, tags="snowman")
+                             fill="#d62828", outline="", tags="snowman")
             c.create_rectangle(x - 0.95 * r2, hb - 0.2 * r2, x + 0.95 * r2,
-                               hb + 0.12 * r2, fill=WHITE, outline=EDGE, tags="snowman")
+                               hb + 0.12 * r2, fill=WHITE, outline="", tags="snowman")
             c.create_oval(tipx - 0.22 * r2, tipy - 0.22 * r2, tipx + 0.22 * r2,
-                          tipy + 0.22 * r2, fill=WHITE, outline=EDGE, tags="snowman")
+                          tipy + 0.22 * r2, fill=WHITE, outline="", tags="snowman")
 
+    # ---------- Yangi yil chiroqlari ----------
     def wire_y(self, x):
         S = self.S
-        seg = 190 * S
-        return 3 * S + 15 * S * math.sin(math.pi * ((x % seg) / seg))
+        seg = 210 * S
+        return 2 * S + 16 * S * math.sin(math.pi * ((x % seg) / seg))
 
-    def draw_lights(self):
-        c, S, w = self.canvas, self.S, self.world
+    def build_lights(self):
+        c, S, W = self.canvas, self.S, self.W
         c.delete("lights")
-        pts = []
+        self.bulbs = []
+        pts, hi = [], []
         x = 0.0
-        while x <= self.W + 10 * S:
-            pts += [x, self.wire_y(x)]
-            x += 10 * S
-        c.create_line(*pts, fill="#14532d", width=2, tags="lights")
-        sp = 34 * S
-        i = 0
-        x = sp / 2
-        while x < self.W:
+        while x <= W + 10 * S:
             y = self.wire_y(x)
-            col = i % len(LIGHT_ON)
-            on = ((w.t // 12) + i) % 3 != 0
-            c.create_line(x, y, x, y + 4 * S, fill="#14532d", width=2, tags="lights")
-            c.create_oval(x - 4 * S, y + 4 * S, x + 4 * S, y + 15 * S,
-                          fill=LIGHT_ON[col] if on else LIGHT_OFF[col],
-                          outline="", tags="lights")
+            pts += [x, y]
+            hi += [x, y - 1]
+            x += 8 * S
+        c.create_line(*pts, fill="#0b2415", width=max(3, int(3 * S)), tags="lights")
+        c.create_line(*hi, fill="#2c5e3e", width=1, tags="lights")
+        px = 0.0
+        while px <= W + 5:
+            py = self.wire_y(px)
+            c.create_oval(px - 3 * S, py - 3 * S, px + 3 * S, py + 3 * S,
+                          fill="#8a8f96", outline="#4a4f55", tags="lights")
+            px += 210 * S
+        sp = 30 * S
+        i = 0
+        x = sp * 0.6
+        while x < W - 10 * S:
+            y = self.wire_y(x)
+            col = BULBS[i % len(BULBS)]
+            c.create_line(x, y, x, y + 3 * S, fill="#0b2415", width=2, tags="lights")
+            c.create_polygon(x - 2.6 * S, y + 3 * S, x + 2.6 * S, y + 3 * S,
+                             x + 2.2 * S, y + 7.5 * S, x - 2.2 * S, y + 7.5 * S,
+                             fill="#16241a", outline="", tags="lights")
+            cy = y + 7 * S + 6.2 * S
+            bl = Bulb()
+            bl.g1 = bl.g2 = None
+            try:
+                bl.g2 = c.create_oval(x - 15 * S, cy - 15 * S, x + 15 * S, cy + 15 * S,
+                                      fill=col[0], outline="", stipple="gray12",
+                                      state="hidden", tags="lights")
+                bl.g1 = c.create_oval(x - 9 * S, cy - 9 * S, x + 9 * S, cy + 9 * S,
+                                      fill=col[0], outline="", stipple="gray25",
+                                      state="hidden", tags="lights")
+            except tk.TclError:
+                bl.g1 = bl.g2 = None
+            bl.neck = c.create_oval(x - 3 * S, y + 6 * S, x + 3 * S, y + 11 * S,
+                                    fill=col[1], outline="", tags="lights")
+            bl.body = c.create_oval(x - 4.4 * S, cy - 6.2 * S, x + 4.4 * S, cy + 6.2 * S,
+                                    fill=col[1], outline="", tags="lights")
+            bl.hl = c.create_oval(x - 2.7 * S, cy - 4.6 * S, x - 0.9 * S, cy - 1.2 * S,
+                                  fill=col[1], outline="", tags="lights")
+            bl.col = col
+            bl.ph = i * 0.85 + random.uniform(0, 0.5)
+            bl.s1 = bl.s2 = False
+            self.bulbs.append(bl)
             x += sp
             i += 1
+        self.lights_built = True
+
+    def update_lights(self):
+        c, t = self.canvas, self.world.t
+        for bl in self.bulbs:
+            b = (0.5 + 0.5 * math.sin(t * 0.07 + bl.ph)) ** 0.8
+            fill = blend(bl.col[1], bl.col[0], b)
+            c.itemconfigure(bl.body, fill=fill)
+            c.itemconfigure(bl.neck, fill=fill)
+            c.itemconfigure(bl.hl, fill=blend(blend(bl.col[1], WHITE, 0.3),
+                                              blend(bl.col[0], WHITE, 0.8), b))
+            if bl.g1 is not None:
+                s1, s2 = b > 0.35, b > 0.62
+                if s1 != bl.s1:
+                    c.itemconfigure(bl.g1, state="normal" if s1 else "hidden")
+                    bl.s1 = s1
+                if s2 != bl.s2:
+                    c.itemconfigure(bl.g2, state="normal" if s2 else "hidden")
+                    bl.s2 = s2
 
     def run(self):
         self.root.mainloop()
