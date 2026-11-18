@@ -577,7 +577,9 @@ class Pile:
     """Bir sirtda (yer, oyna tepasi, ikonka) to'planadigan qor qatlami."""
     WEIGHTS = [6 - abs(d) for d in range(-5, 6)]
 
-    def __init__(self, x0, x1, y, col, maxh, slope, open_edges, S, noise_k=1.0):
+    def __init__(self, x0, x1, y, col, maxh, slope, open_edges, S, noise_k=1.0,
+                 kind="ground"):
+        self.kind = kind
         self.col, self.maxh, self.slope = col, maxh, slope
         self.open, self.S, self.noise_k = open_edges, S, noise_k
         self.active = True
@@ -598,7 +600,7 @@ class Pile:
             self.h += [0.0] * add
             for _ in range(add):
                 prev = self.noise[-1] if self.noise else 0.0
-                self.noise.append(0.55 * prev + 0.45 * random.uniform(-1, 1) * 1.6 * self.S)
+                self.noise.append(0.78 * prev + 0.22 * random.uniform(-1, 1) * 4.5 * self.S)
         elif n < len(self.h):
             del self.h[n:]
             del self.noise[n:]
@@ -619,6 +621,18 @@ class Pile:
             k = min(len(profile) - 1, int(i * self.col + self.col / 2.0))
             p = profile[k]
             base.append(None if p is None else float(p))
+        self.base = base
+        self.dirty = True
+
+    def set_corners(self, R):
+        """Oyna yuqori burchaklari yumaloq: qor burchak bo'ylab egilib, chetdan chiqmaydi."""
+        n = len(self.h)
+        w = self.x1 - self.x0
+        base = []
+        for i in range(n):
+            xc = i * self.col + self.col / 2.0
+            d = min(xc, w - xc)
+            base.append(R - math.sqrt(max(0.0, R * R - (R - d) ** 2)) if d < R else 0.0)
         self.base = base
         self.dirty = True
 
@@ -711,7 +725,7 @@ class Pile:
             elif sj and h[i + 1] > 0:
                 h[i + 1] *= 0.8
                 moved = True
-        if self.open and base is None:
+        if self.open:
             if h[0] > lim:
                 h[0] -= (h[0] - lim) * 0.3
                 moved = True
@@ -754,15 +768,14 @@ class Pile:
 
     def runs(self):
         """Qor bor uzluksiz bo'laklar: [(tana nuqtalari, ustki oq qatlam nuqtalari)].
-        Qor yo'q joylarda hech narsa chizilmaydi (ingichka chiziqlar hosil bo'lmaydi)."""
+        Qor yo'q joylarda hech narsa chizilmaydi; qor sirt chegarasidan chiqmaydi."""
         if not self.active:
             return []
         S, col = self.S, self.col
         t = self._tops()
         n = len(t)
         thr = 0.3 * S
-        flat_open = self.base is None and self.open
-        lift = 1.5 * S if flat_open else (3.0 if self.base is None else 0.0)
+        lift = {"ground": 3.0, "win": 2.0 * S, "icon": 0.0}[self.kind]
         out = []
         i = 0
         while i < n:
@@ -776,23 +789,12 @@ class Pile:
             i = j + 1
             if len(seg) < 2:
                 continue
-            xa, xb = seg[0][0], seg[-1][0]
-            at_l, at_r = seg[0][0] == self.x0, j == n - 1
-            body = []
-            if flat_open and at_l:             # oyna chetiga yopishib, biroz osilib turadi
-                h0 = seg[0][2] - seg[0][1]
-                body += [xa - 2 * col, self.y + 5 * S, xa - 2 * col, self.y - h0 * 0.3,
-                         xa - col, self.y - h0 * 0.65]
-            else:
-                body += [xa - col * 0.5, seg[0][2] + lift]
+            xl = max(self.x0, seg[0][0] - col * 0.5)
+            xr = min(self.x1, seg[-1][0] + col * 0.5)
+            body = [xl, seg[0][2] + lift]
             for (x, ty, by) in seg:
                 body += [x, ty]
-            if flat_open and at_r:
-                hl = seg[-1][2] - seg[-1][1]
-                body += [xb + col, self.y - hl * 0.65, xb + 2 * col, self.y - hl * 0.3,
-                         xb + 2 * col, self.y + 5 * S]
-            else:
-                body += [xb + col * 0.5, seg[-1][2] + lift]
+            body += [xr, seg[-1][2] + lift]
             for (x, ty, by) in reversed(seg):
                 body += [x, by + lift]
             top, low = [], []
@@ -949,6 +951,8 @@ class World:
     # ---------------- bo'laklar (chunk) ----------------
     def spawn_chunk(self, x, y, vx, vy, r, dust=False):
         x = min(max(x, 1.0), self.W - 1.0)
+        lim = 30 * self.S
+        vx = max(-lim, min(lim, vx))
         if len(self.chunks) >= MAX_CHUNKS:
             self.ground_pile.add(x, r)
             return
@@ -959,13 +963,30 @@ class World:
         gp = self.ground_pile
         alive = []
         for c in self.chunks:
+            if (not c.dust and c.r > 2.6 * S and random.random() < 0.025
+                    and len(alive) + len(self.chunks) < MAX_CHUNKS * 1.5):
+                # havoda katta qor bo'lagi yumshoq bo'laklarga ajraladi
+                k = random.choice((2, 3))
+                nr = c.r / math.sqrt(k) * 0.95
+                for _ in range(k):
+                    alive.append(Chunk(c.x + random.uniform(-c.r, c.r) * 0.6,
+                                       c.y + random.uniform(-c.r, c.r) * 0.4,
+                                       c.vx + random.uniform(-1.8, 1.8) * S,
+                                       c.vy + random.uniform(-1.0, 0.6) * S, nr, False))
+                for _ in range(2):
+                    alive.append(Chunk(c.x, c.y, c.vx + random.uniform(-2.5, 2.5) * S,
+                                       c.vy + random.uniform(-2, 1) * S,
+                                       random.uniform(0.6, 1.2) * S, True))
+                if c.item is not None:
+                    self.dead.append(c.item)
+                continue
             if c.dust:
                 c.vy += 0.18 * S
                 c.vx *= 0.96
                 c.vy *= 0.97
             else:
                 c.vy += GRAVITY * S * 0.9
-                c.vx *= 0.99
+                c.vx *= 0.985
             c.x += c.vx
             c.y += c.vy
             if c.x < 0:
@@ -1063,25 +1084,47 @@ class World:
                              vx0 + random.uniform(-1.5, 1.5) * S,
                              vy0 + random.uniform(-0.5, 1.0) * S, r)
 
-    def slide_off(self, p, vx0, vy0):
-        """Sirt siljiganda butun qor sirpanib tushadi va sirt tozalanadi."""
+    def release_snow(self, p, vx=0.0, vy=0.0, stagger=0):
+        """Sirtdagi butun qorni bo'laklarga aylantirib uchirib yuboradi va sirtni tozalaydi.
+        (vx, vy) — sirtning kadr boshiga tezligi: qor shu tomonga sachrab uchadi.
+        stagger>0: qor birdaniga emas, shuncha kadr ichida bosqichma-bosqich to'kiladi."""
         S = self.S
         cols = len(p.h)
-        g = 4
+        g = 3
+        groups = []
         for j in range(0, cols, g):
             area = sum(p.h[j:j + g]) * p.col
-            if area >= 3:
+            if area >= 2:
                 xc = p.x0 + (j + g / 2.0) * p.col
-                pieces = int(area / (math.pi * GAIN * (5 * S) ** 2)) + 1
-                r = math.sqrt(area / pieces / (math.pi * GAIN))
-                ty = p.top_y_at(xc)
-                for _ in range(pieces):
-                    self.spawn_chunk(xc + random.uniform(-g, g) * p.col * 0.5, ty - r,
-                                     vx0 + random.uniform(-1, 1) * S,
-                                     vy0 + random.uniform(0, 1.2) * S, r)
+                groups.append((xc, p.top_y_at(xc), area))
             for k in range(j, min(j + g, cols)):
                 p.h[k] = 0.0
         p.dirty = True
+        lift = min(9 * S, math.hypot(vx, vy) * 0.3)
+        width = g * p.col
+        for xc, ty, area in groups:
+            delay = random.randint(0, stagger) if stagger else 0
+            fn = (lambda xc=xc, ty=ty, area=area:
+                  self._spawn_group(xc, ty, area, vx, vy, lift, width))
+            if delay <= 0:
+                fn()
+            else:
+                self.events.append([self.t + delay, fn])
+
+    def _spawn_group(self, xc, ty, area, vx, vy, lift, width):
+        S = self.S
+        pieces = int(area / (math.pi * GAIN * (5 * S) ** 2)) + 1
+        r = math.sqrt(area / pieces / (math.pi * GAIN))
+        for _ in range(pieces):
+            self.spawn_chunk(xc + random.uniform(-width / 2, width / 2), ty - r,
+                             vx * random.uniform(0.6, 1.25) + random.uniform(-1.5, 1.5) * S,
+                             vy * 0.5 - random.uniform(0.2, 1.0) * lift
+                             + random.uniform(-0.3, 1.0) * S, r)
+        for _ in range(2 if lift > 1 else 1):
+            self.spawn_chunk(xc, ty - S, vx * random.uniform(0.7, 1.4)
+                             + random.uniform(-2, 2) * S,
+                             vy * 0.4 - random.uniform(0.2, 1.2) * lift - S,
+                             random.uniform(0.6, 1.2) * S, dust=True)
 
     def burst_pile(self, p, mx):
         S = self.S
@@ -1466,7 +1509,7 @@ class World:
         for k in list(self.surfaces):
             if k not in seen:
                 s = self.surfaces.pop(k)
-                self.slide_off(s, 0.0, 0.0)      # qor bo'shashib to'kiladi
+                self.release_snow(s, 0.0, 0.0, stagger=14)   # oyna yopildi: qor to'kiladi
                 for pair in s.items:
                     self.dead.append(pair[0])
                     self.dead.append(pair[1])
@@ -1477,16 +1520,20 @@ class World:
         s = self.surfaces.get(key)
         if s is None:
             if kind == "win":
-                s = Pile(x0, x1, y, self.col, 24 * S, self.slope, True, S)
+                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 24 * S, 0.8 * S, True,
+                         S, 1.0, "win")
             else:
-                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 9 * S, 1.4 * S, True, S, 0.6)
+                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 9 * S, 1.4 * S, True, S, 0.6,
+                         "icon")
             self.surfaces[key] = s
         else:
             dx, dy = x0 - s.x0, y - s.y
-            if abs(dx) > 3 * S or abs(dy) > 3 * S:     # siljitildi: qor sirpanib tushadi
-                self.slide_off(s, max(-6 * S, min(6 * S, dx * 0.3)),
-                               max(0.0, min(8 * S, dy * 0.3)))
+            if abs(dx) > 3 * S or abs(dy) > 3 * S:     # siljitildi: qor sachrab uchadi
+                self.release_snow(s, max(-28 * S, min(28 * S, dx / 2.0)),
+                                  max(-12 * S, min(12 * S, dy / 2.0)))
             s.move(x0, x1, y)
+        if kind == "win" and (s.base is None or len(s.base) != len(s.h)):
+            s.set_corners(7 * S)
         if kind == "icon":
             if s.prof_id != id(profile) or s.base is None or len(s.base) != len(s.h):
                 s.set_profile(profile, x1 - x0)
