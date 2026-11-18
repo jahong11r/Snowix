@@ -238,29 +238,39 @@ def grab_screen(x, y, w, h):
         u.ReleaseDC(None, hdc)
 
 
-def compute_profile(buf, w, h_total, margin, thresh=42):
+def compute_profile(buf, w, h_total, margin, thresh=42, skip_first=False):
     """Ikonka siluetining yuqori chegarasi.
     buf — BGRA baytlar (yuqoridan pastga), tepada `margin` qator ikonkadan tashqarida.
     Har bir ustunda keskin rang sakrashi (ikonka cheti) qidiriladi; fon gradienti
     sekin o'zgargani uchun xalaqit bermaydi.
+    skip_first=True: ikonka tanlangan (ko'k fon), birinchi sakrash (fon cheti)
+    o'tkazib yuboriladi.
     Qaytaradi: har bir ustun uchun ikonka tepasidan masofa (px) yoki None."""
     rows = h_total - margin
-    limit = int(rows * 0.75)
+    end = margin + int(rows * 0.75)
     prof = []
     for x in range(w):
         found = None
         streak = 0
-        for r in range(limit):
-            i = ((margin + r) * w + x) * 4
-            j = ((margin + r - 2) * w + x) * 4
+        stage = 0 if skip_first else 1
+        r = margin
+        while r < end:
+            i = (r * w + x) * 4
+            j = ((r - 2) * w + x) * 4
             d = abs(buf[i] - buf[j]) + abs(buf[i + 1] - buf[j + 1]) + abs(buf[i + 2] - buf[j + 2])
             if d > thresh:
                 streak += 1
                 if streak >= 2:
-                    found = max(0, r - 1)
+                    if stage == 0:
+                        stage = 1
+                        streak = 0
+                        r += 3
+                        continue
+                    found = max(0, r - 1 - margin)
                     break
             else:
                 streak = 0
+            r += 1
         prof.append(found)
     out = []
     for x in range(w):
@@ -413,7 +423,7 @@ class DesktopIcons:
         self.lv, self.proc, self.remote = lv, proc, remote
         self.ok = True
 
-    def capture(self, l, t, r, b):
+    def capture(self, l, t, r, b, sel=False):
         S = self.S
         m = 4
         w, h = int(r - l), int(b - t)
@@ -424,7 +434,7 @@ class DesktopIcons:
         buf = grab_screen(int(l), int(t - m), w, h + m)
         if buf is None:
             return None
-        prof = compute_profile(buf, w, h + m, m)
+        prof = compute_profile(buf, w, h + m, m, skip_first=sel)
         return prof if profile_ok(prof) else None
 
     def query(self, covered, mouse):
@@ -466,15 +476,15 @@ class DesktopIcons:
                 if ent is None or ent[0] != key:
                     ent = [key, None, 0, self.nq]
                     self.cache[i] = ent
-                want = ent[1] is None and ent[2] < 4 and self.nq >= ent[3]
+                want = ent[1] is None and self.nq >= ent[3]
                 if want and captures < 3 and not down:
                     pts = ((l + 2, t + 2), (rr - 2, t + 2), ((l + rr) / 2, (t + bb) / 2),
                            (l + 2, bb - 2), (rr - 2, bb - 2))
                     near = (l - 12 * S <= mx <= rr + 12 * S and t - 12 * S <= my <= bb + 12 * S)
-                    state = u.SendMessageW(self.lv, 0x102C, i, 0x000B)   # SELECTED|FOCUSED|DROP
-                    if not near and not state and not any(covered(x, y) for x, y in pts):
+                    state = u.SendMessageW(self.lv, 0x102C, i, 0x000A)   # SELECTED|DROPHILITED
+                    if not near and not any(covered(x, y) for x, y in pts):
                         captures += 1
-                        prof = self.capture(l, t, rr, bb)
+                        prof = self.capture(l, t, rr, bb, bool(state))
                         if prof is not None:
                             ent[1] = prof
                         else:
@@ -576,8 +586,7 @@ class Pile:
         self.vis = None
         self.base = None          # ikonka silueti (har ustun uchun tepadan masofa yoki None)
         self.prof_id = -1
-        self.item = self.item2 = None
-        self.shown = True
+        self.items = []           # chizilgan [tana, ustki qatlam, ko'rinadimi] juftliklari
         self.dirty = True
         self.x0 = self.x1 = self.y = None
         self.move(x0, x1, y)
@@ -743,39 +752,56 @@ class Pile:
             x += col
         return out
 
-    def points(self):
-        y, col, S = self.y, self.col, self.S
+    def runs(self):
+        """Qor bor uzluksiz bo'laklar: [(tana nuqtalari, ustki oq qatlam nuqtalari)].
+        Qor yo'q joylarda hech narsa chizilmaydi (ingichka chiziqlar hosil bo'lmaydi)."""
+        if not self.active:
+            return []
+        S, col = self.S, self.col
         t = self._tops()
-        if self.base is not None:
-            return ([c for (x, ty, by) in t for c in (x, ty)]
-                    + [c for (x, ty, by) in reversed(t) for c in (x, by)])
-        pts = []
-        if self.open:
-            h0 = y - t[0][1]
-            pts += [self.x0 - 2 * col, y + 5 * S, self.x0 - 2 * col, y - h0 * 0.25,
-                    self.x0 - col, y - h0 * 0.6]
-        else:
-            pts += [self.x0, y + 3]
-        for (x, ty, by) in t:
-            pts += [x, ty]
-        last = t[-1][0]
-        if self.open:
-            hl = y - t[-1][1]
-            pts += [last + col, y - hl * 0.6, last + 2 * col, y - hl * 0.25,
-                    last + 2 * col, y + 5 * S]
-        else:
-            pts += [last, y + 3]
-        return pts
-
-    def crust(self):
-        """Qorning ustki oq qatlami (hajm ko'rinishi uchun)."""
-        S = self.S
-        t = self._tops()
-        top = [c for (x, ty, by) in t for c in (x, ty)]
-        low = []
-        for (x, ty, by) in reversed(t):
-            low += [x, ty + min((by - ty) * 0.55, 2.6 * S) + 0.5]
-        return top + low
+        n = len(t)
+        thr = 0.3 * S
+        flat_open = self.base is None and self.open
+        lift = 1.5 * S if flat_open else (3.0 if self.base is None else 0.0)
+        out = []
+        i = 0
+        while i < n:
+            if t[i][2] - t[i][1] < thr:
+                i += 1
+                continue
+            j = i
+            while j + 1 < n and t[j + 1][2] - t[j + 1][1] >= thr:
+                j += 1
+            seg = t[i:j + 1]
+            i = j + 1
+            if len(seg) < 2:
+                continue
+            xa, xb = seg[0][0], seg[-1][0]
+            at_l, at_r = seg[0][0] == self.x0, j == n - 1
+            body = []
+            if flat_open and at_l:             # oyna chetiga yopishib, biroz osilib turadi
+                h0 = seg[0][2] - seg[0][1]
+                body += [xa - 2 * col, self.y + 5 * S, xa - 2 * col, self.y - h0 * 0.3,
+                         xa - col, self.y - h0 * 0.65]
+            else:
+                body += [xa - col * 0.5, seg[0][2] + lift]
+            for (x, ty, by) in seg:
+                body += [x, ty]
+            if flat_open and at_r:
+                hl = seg[-1][2] - seg[-1][1]
+                body += [xb + col, self.y - hl * 0.65, xb + 2 * col, self.y - hl * 0.3,
+                         xb + 2 * col, self.y + 5 * S]
+            else:
+                body += [xb + col * 0.5, seg[-1][2] + lift]
+            for (x, ty, by) in reversed(seg):
+                body += [x, by + lift]
+            top, low = [], []
+            for (x, ty, by) in seg:
+                top += [x, ty]
+            for (x, ty, by) in reversed(seg):
+                low += [x, ty + min((by - ty) * 0.55, 2.6 * S) + 0.5]
+            out.append((body, top + low))
+        return out
 
     def clear(self):
         self.h = [0.0] * len(self.h)
@@ -1441,9 +1467,9 @@ class World:
             if k not in seen:
                 s = self.surfaces.pop(k)
                 self.slide_off(s, 0.0, 0.0)      # qor bo'shashib to'kiladi
-                for it in (s.item, s.item2):
-                    if it is not None:
-                        self.dead.append(it)
+                for pair in s.items:
+                    self.dead.append(pair[0])
+                    self.dead.append(pair[1])
         self.surf_list = [s for s in self.surfaces.values() if s.active]
 
     def _upd_surface(self, key, kind, x0, x1, y, higher, profile):
@@ -1453,7 +1479,7 @@ class World:
             if kind == "win":
                 s = Pile(x0, x1, y, self.col, 24 * S, self.slope, True, S)
             else:
-                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 7 * S, 1.4 * S, True, S, 0.35)
+                s = Pile(x0, x1, y, max(2, int(round(2 * S))), 9 * S, 1.4 * S, True, S, 0.6)
             self.surfaces[key] = s
         else:
             dx, dy = x0 - s.x0, y - s.y
@@ -1465,8 +1491,11 @@ class World:
             if s.prof_id != id(profile) or s.base is None or len(s.base) != len(s.h):
                 s.set_profile(profile, x1 - x0)
                 s.prof_id = id(profile)
-        s.vis = self._vis(s, higher)
-        s.active = s.vis is None or any(s.vis)
+        nv = self._vis(s, higher)
+        act = nv is None or any(nv)
+        if nv != s.vis or act != s.active:
+            s.dirty = True
+        s.vis, s.active = nv, act
 
     @staticmethod
     def _vis(s, higher):
@@ -1520,11 +1549,6 @@ class App:
         root.update()
 
         self.world = World(self.W, self.H, self.ground, S)
-        gp = self.world.ground_pile
-        gp.item = self.canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=PILE_BODY,
-                                             outline="", tags="pile")
-        gp.item2 = self.canvas.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE,
-                                              outline="", tags="pile")
         self.sm_sig = None
         self.lights_on = tk.BooleanVar(value=True)
         self.snow_var = tk.BooleanVar(value=True)
@@ -1720,25 +1744,27 @@ class App:
 
         gp = w.ground_pile
         for p in [gp] + list(w.surfaces.values()):
-            is_g = p is gp
-            show = True if is_g else (p.active and max(p.h) > 0.4)
-            if p.item is None:
-                p.item = c.create_polygon(0, 0, 0, 0, 0, 0, fill=PILE_BODY, outline="",
-                                          tags="pile", state="hidden")
-                p.item2 = c.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE, outline="",
-                                           tags="pile", state="hidden")
-                p.shown = False
-                p.dirty = True
-            if show != p.shown:
-                st = "normal" if show else "hidden"
-                c.itemconfigure(p.item, state=st)
-                c.itemconfigure(p.item2, state=st)
-                p.shown = show
-                p.dirty = True
-            if show and p.dirty and (not is_g or w.t % 3 == 0):
-                c.coords(p.item, *p.points())
-                c.coords(p.item2, *p.crust())
-                p.dirty = False
+            if not (p.dirty and (p is not gp or w.t % 3 == 0)):
+                continue
+            runs = p.runs()
+            while len(p.items) < len(runs):
+                p.items.append([c.create_polygon(0, 0, 0, 0, 0, 0, fill=PILE_BODY,
+                                                 outline="", tags="pile"),
+                                c.create_polygon(0, 0, 0, 0, 0, 0, fill=WHITE,
+                                                 outline="", tags="pile"), True])
+            for k, pair in enumerate(p.items):
+                if k < len(runs):
+                    c.coords(pair[0], *runs[k][0])
+                    c.coords(pair[1], *runs[k][1])
+                    if not pair[2]:
+                        c.itemconfigure(pair[0], state="normal")
+                        c.itemconfigure(pair[1], state="normal")
+                        pair[2] = True
+                elif pair[2]:
+                    c.itemconfigure(pair[0], state="hidden")
+                    c.itemconfigure(pair[1], state="hidden")
+                    pair[2] = False
+            p.dirty = False
 
         c.delete("ball")
         for b in w.balls:
