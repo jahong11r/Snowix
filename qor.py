@@ -302,6 +302,38 @@ def profile_ok(prof, min_solid=0.4):
     return True
 
 
+class IconDrag:
+    """Ikonka chap tugma bilan sudralganda, ustidagi qorni sudrash tomoniga sachratadi."""
+
+    def __init__(self, S):
+        self.S = S
+        self.cur = None
+        self.prev = None
+        self.prev_down = False
+
+    def update(self, mx, my, down, icons, covered, fling):
+        S = self.S
+        if down and not self.prev_down:
+            self.cur = None
+            if not covered(mx, my):
+                for (i, l, t, rr, bb, prof) in icons:
+                    if l - 8 * S <= mx <= rr + 8 * S and t <= my <= bb + 36 * S:
+                        self.cur = [i, mx, my, False]
+                        break
+        if not down:
+            self.cur = None
+        elif self.cur is not None and not self.cur[3]:
+            i, sx, sy, _ = self.cur
+            d = math.hypot(mx - sx, my - sy)
+            if d > 8 * S:
+                px, py = self.prev if self.prev else (sx, sy)
+                sp = max(9 * S, math.hypot(mx - px, my - py) * 1.8)
+                fling(i, (mx - sx) / d * sp, (my - sy) / d * sp)
+                self.cur[3] = True
+        self.prev = (mx, my)
+        self.prev_down = down
+
+
 class WinScanner:
     """Ochiq oynalarning joylashuvini (z-tartibda, tepadan pastga) o'qiydi."""
 
@@ -1191,6 +1223,16 @@ class World:
                             vy * 0.5 - random.uniform(0.2, 1.0) * lift
                             + random.uniform(-0.3, 0.8) * S, r)
 
+    def fling_icon(self, idx, vx, vy):
+        """Ikonka sudralayotganda ustidagi qor sudrash tomoniga sachrab uchadi."""
+        s = self.surfaces.get(("i", idx))
+        if s is None or s.area() < 2:
+            return
+        S = self.S
+        s.moving = True
+        s.still = 0
+        self.release_snow(s, max(-28 * S, min(28 * S, vx)), max(-12 * S, min(12 * S, vy)))
+
     def burst_pile(self, p, mx):
         S = self.S
         R = (55 if p is self.ground_pile else 38) * S
@@ -1597,8 +1639,14 @@ class World:
                 s.still = 0
                 if not s.moving:        # siljish boshlandi: qor sachrab uchadi
                     s.moving = True
-                    self.release_snow(s, max(-28 * S, min(28 * S, dx / 2.0)),
-                                      max(-12 * S, min(12 * S, dy / 2.0)))
+                    if kind == "icon":      # ikonka sakrab ko'chadi: yo'nalishi muhim
+                        d = math.hypot(dx, dy) or 1.0
+                        sp = min(28 * S, max(6 * S, d / 8.0))
+                        vx, vy = dx / d * sp, dy / d * sp
+                    else:
+                        vx, vy = dx / 2.0, dy / 2.0
+                    self.release_snow(s, max(-28 * S, min(28 * S, vx)),
+                                      max(-12 * S, min(12 * S, vy)))
                 # siljish davom etayotganda tushgan yangi qor oynada qoladi (ushlab olish)
             else:
                 s.still += 1
@@ -1637,11 +1685,25 @@ class World:
 # =====================================================================
 #  Ilova: oynalar va chizish
 # =====================================================================
-def wire_y(x, S):
-    """Girlyanda simi: mixchalar orasida osilib turadi, mixchada o'tkir cho'qqi."""
-    seg = 250 * S
-    u = (x % seg) / seg
-    return 3 * S + 24 * S * 4 * u * (1 - u)
+def make_wire(W, S, seed=11):
+    """Mixchalar: [(x, kenglik, osilish)] — oraliqlari notekis, tabiiy."""
+    rnd = random.Random(seed)
+    pegs = []
+    x = -rnd.uniform(0, 150) * S
+    while x < W + 300 * S:
+        seg = rnd.uniform(210, 300) * S
+        pegs.append((x, seg, seg * rnd.uniform(0.09, 0.12)))
+        x += seg
+    return pegs
+
+
+def wire_y(pegs, x, S):
+    """Sim balandligi: mixchada o'tkir cho'qqi, orasida osilib turadi."""
+    for (px, seg, sag) in pegs:
+        if px <= x < px + seg:
+            u = (x - px) / seg
+            return 3 * S + sag * 4 * u * (1 - u)
+    return 3 * S
 
 
 def egg_points(cx, cy, a, b, dx, dy, n=20):
@@ -1656,24 +1718,32 @@ def egg_points(cx, cy, a, b, dx, dy, n=20):
     return pts
 
 
-def layout_bulbs(W, S):
-    """Lampochkalar joyi va og'ish burchagi (har safar bir xil)."""
+def layout_bulbs(W, S, pegs):
+    """Lampochkalar sim uzunligi bo'ylab teng taqsimlanadi; og'ish burchagi turlicha."""
     rnd = random.Random(7)
     out = []
-    x = 17 * S
     i = 0
+    target = 20 * S
+    acc = 0.0
+    x = 0.0
+    py = wire_y(pegs, 0.0, S)
     while x < W - 8 * S:
-        y = wire_y(x, S)
-        sign = 1 if i % 2 == 0 else -1
-        deg = rnd.uniform(5, 25) if rnd.random() < 0.4 else rnd.uniform(25, 62)
-        out.append((x, y, sign * math.radians(deg), rnd.uniform(0, 6.28)))
-        x += 34 * S * rnd.uniform(0.85, 1.15)
-        i += 1
+        x += 1.0
+        y = wire_y(pegs, x, S)
+        acc += math.hypot(1.0, y - py)
+        py = y
+        if acc >= target:
+            sign = 1 if i % 2 == 0 else -1
+            deg = rnd.uniform(5, 25) if rnd.random() < 0.4 else rnd.uniform(25, 62)
+            out.append((x, y, sign * math.radians(deg), rnd.uniform(0, 6.28)))
+            acc = 0.0
+            target = 36 * S * rnd.uniform(0.9, 1.18)
+            i += 1
     return out
 
 
 class Bulb:
-    __slots__ = ("body", "core", "fil", "hl", "g1", "g2", "g3", "ph", "lvl", "s")
+    __slots__ = ("body", "mid", "core", "fil", "hl", "g", "ph", "lvl", "s", "k")
 
 
 class App:
@@ -1712,6 +1782,8 @@ class App:
         self.icon_snow = tk.BooleanVar(value=True)
         self.bulbs = []
         self.twinkle = {}
+        self.pegs = None
+        self.lights_t0 = 0
         self.lights_built = False
 
         self.hwnd = None
@@ -1722,6 +1794,7 @@ class App:
         self.scanner = WinScanner(self.hwnd, S)
         self.icon_reader = DesktopIcons(S, self.W, self.H)
         self.icons = []
+        self.icon_drag = IconDrag(S)
         self.last_wins = []
         self.mouse = (-1, -1, False)
         self.refresh_n = 0
@@ -1830,7 +1903,7 @@ class App:
         self.last_wins = wins
         if not self.win_snow.get():
             wins = [(k, a, b, c, d, False) for (k, a, b, c, d, ok) in wins]
-        if self.refresh_n % 3 == 0:
+        if self.refresh_n % 2 == 0:
             self.icons = (self.icon_reader.query(self.covered, self.mouse)
                           if self.icon_snow.get() else [])
         self.refresh_n += 1
@@ -1846,6 +1919,8 @@ class App:
                 mx, my, down, rdown = -1, -1, False, False
             self.mouse = (mx, my, down)
             w = self.world
+            if self.icon_snow.get():
+                self.icon_drag.update(mx, my, down, self.icons, self.covered, w.fling_icon)
             if w.t % 2 == 0:
                 self.refresh_surfaces()
             w.step(mx, my, down, rdown)
@@ -2063,10 +2138,12 @@ class App:
         c.delete("lights")
         self.bulbs = []
         self.twinkle = {}
+        self.pegs = make_wire(W, S)
+        self.lights_t0 = self.world.t
         pa, pb = [], []
         x = 0.0
         while x <= W + 6:
-            y = wire_y(x, S)
+            y = wire_y(self.pegs, x, S)
             tw = 1.4 * S * math.sin(x * 0.42)
             pa += [x, y + tw]
             pb += [x, y - tw]
@@ -2074,57 +2151,60 @@ class App:
         wd = max(2, int(2 * S))
         c.create_line(*pb, fill="#3d2218", width=wd, tags="lights")
         c.create_line(*pa, fill="#7a2323", width=wd, tags="lights")
-        px = 0.0
-        while px <= W + 5:
-            py = wire_y(px, S)
-            r = 2.0 * S
-            c.create_oval(px - r, py - r, px + r, py + r, fill="#8d949b",
-                          outline="#4a4f55", tags="lights")
-            px += 250 * S
-        for (x, y, th, ph) in layout_bulbs(W, S):
+        for (px, seg, sag) in self.pegs:
+            if 0 <= px <= W:
+                r = 2.0 * S
+                py = wire_y(self.pegs, px, S)
+                c.create_oval(px - r, py - r, px + r, py + r, fill="#8d949b",
+                              outline="#4a4f55", tags="lights")
+        glow = ((2.7, "#ff9a1f", "gray12"), (2.0, "#ffa826", "gray25"),
+                (1.45, "#ffb82e", "gray50"), (1.15, "#ffcb4a", "gray75"))
+        for k, (x, y, th, ph) in enumerate(layout_bulbs(W, S, self.pegs)):
             dx, dy = math.sin(th), math.cos(th)
             nx, ny = -dy, dx
             Ls, a, b = 4.5 * S, 8.5 * S, 5.0 * S
             cx, cy = x + dx * (Ls + a * 0.95), y + dy * (Ls + a * 0.95)
             bl = Bulb()
-            bl.g1 = bl.g2 = bl.g3 = None
-            try:           # yumshoq yorug'lik: 3 qatlamli (stipple) nur
-                bl.g1 = c.create_oval(cx - 2.4 * a, cy - 2.4 * a, cx + 2.4 * a, cy + 2.4 * a,
-                                      fill="#ffb52e", outline="", stipple="gray12",
-                                      state="hidden", tags="lights")
-                bl.g2 = c.create_oval(cx - 1.7 * a, cy - 1.7 * a, cx + 1.7 * a, cy + 1.7 * a,
-                                      fill="#ffb52e", outline="", stipple="gray25",
-                                      state="hidden", tags="lights")
-                bl.g3 = c.create_oval(cx - 1.18 * a, cy - 1.18 * a, cx + 1.18 * a,
-                                      cy + 1.18 * a, fill="#ffbf3d", outline="",
-                                      stipple="gray50", state="hidden", tags="lights")
+            bl.g = []
+            try:           # yumshoq yorug'lik: 4 zichlikdagi (stipple) halqalar
+                for (m, col, stip) in glow:
+                    bl.g.append(c.create_oval(cx - m * a, cy - m * a, cx + m * a, cy + m * a,
+                                              fill=col, outline="", stipple=stip,
+                                              state="hidden", tags="lights"))
             except tk.TclError:
-                bl.g1 = bl.g2 = bl.g3 = None
+                bl.g = []
             c.create_polygon(x + nx * 1.7 * S, y + ny * 1.7 * S, x - nx * 1.7 * S,
                              y - ny * 1.7 * S, x + dx * Ls - nx * 2.3 * S,
                              y + dy * Ls - ny * 2.3 * S, x + dx * Ls + nx * 2.3 * S,
                              y + dy * Ls + ny * 2.3 * S, fill="#1f5a2c",
                              outline="#10381a", tags="lights")
-            for f in (0.38, 0.7):
+            for f in (0.3, 0.55, 0.8):
                 w_ = (1.7 + 0.6 * f) * S
                 c.create_line(x + dx * Ls * f + nx * w_, y + dy * Ls * f + ny * w_,
                               x + dx * Ls * f - nx * w_, y + dy * Ls * f - ny * w_,
                               fill="#2f7a40", width=1, tags="lights")
-            bl.body = c.create_polygon(*egg_points(cx, cy, a, b, dx, dy), fill="#6d4716",
+            bl.body = c.create_polygon(*egg_points(cx, cy, a, b, dx, dy), fill="#4a2f0e",
                                        outline="", tags="lights")
+            bl.mid = c.create_polygon(*egg_points(cx + dx * 0.3 * S, cy + dy * 0.3 * S,
+                                                  a * 0.82, b * 0.78, dx, dy, 18),
+                                      fill="#6b4a18", outline="", tags="lights")
             bl.core = c.create_polygon(*egg_points(cx + dx * 0.6 * S, cy + dy * 0.6 * S,
-                                                   a * 0.62, b * 0.6, dx, dy, 16),
-                                       fill="#a97a30", outline="", tags="lights")
-            bl.fil = c.create_line(cx - dx * a * 0.45, cy - dy * a * 0.45,
-                                   cx + dx * a * 0.35, cy + dy * a * 0.35,
-                                   fill="#a97a30", width=max(1, int(S * 0.8)), tags="lights")
-            bl.hl = c.create_polygon(*egg_points(cx - nx * b * 0.45 - dx * a * 0.1,
-                                                 cy - ny * b * 0.45 - dy * a * 0.1,
-                                                 a * 0.35, b * 0.16, dx, dy, 10),
-                                     fill="#a97a30", outline="", tags="lights")
+                                                   a * 0.55, b * 0.5, dx, dy, 16),
+                                       fill="#8c6a2a", outline="", tags="lights")
+            fo = b * 0.2
+            bl.fil = c.create_line(cx - dx * a * 0.42 + nx * fo, cy - dy * a * 0.42 + ny * fo,
+                                   cx + dx * a * 0.3 + nx * fo, cy + dy * a * 0.3 + ny * fo,
+                                   cx + dx * a * 0.3 - nx * fo, cy + dy * a * 0.3 - ny * fo,
+                                   cx - dx * a * 0.42 - nx * fo, cy - dy * a * 0.42 - ny * fo,
+                                   fill="#8c6a2a", width=max(1, int(S * 0.7)), tags="lights")
+            bl.hl = c.create_polygon(*egg_points(cx - nx * b * 0.5 - dx * a * 0.1,
+                                                 cy - ny * b * 0.5 - dy * a * 0.1,
+                                                 a * 0.35, b * 0.14, dx, dy, 10),
+                                     fill="#8c6a2a", outline="", tags="lights")
             bl.ph = ph
+            bl.k = k
             bl.lvl = -1
-            bl.s = [False, False, False]
+            bl.s = [False] * len(bl.g)
             self.bulbs.append(bl)
         self.lights_built = True
 
@@ -2135,28 +2215,30 @@ class App:
             k = random.randrange(len(self.bulbs))
             if k not in tw:
                 tw[k] = t
-        for k, bl in enumerate(self.bulbs):
-            b = 0.9 + 0.1 * math.sin(t * 0.05 + bl.ph)
-            if k in tw:
-                u = (t - tw[k]) / 24.0
+        t0 = self.lights_t0
+        for bl in self.bulbs:
+            ramp = max(0.0, min(1.0, (t - t0 - bl.k * 2) / 18.0))   # birin-ketin yonadi
+            b = (0.94 + 0.06 * math.sin(t * 0.05 + bl.ph)) * ramp ** 1.5
+            if bl.k in tw:
+                u = (t - tw[bl.k]) / 24.0
                 if u >= 1:
-                    del tw[k]
+                    del tw[bl.k]
                 else:
                     b *= 1 - 0.75 * math.sin(math.pi * u)
-            lvl = int(b * 12)
+            lvl = int(b * 14)
             if lvl == bl.lvl:
                 continue
             bl.lvl = lvl
-            c.itemconfigure(bl.body, fill=blend("#6d4716", "#ffc14a", b))
-            c.itemconfigure(bl.core, fill=blend("#a97a30", "#fff4c9", b))
-            c.itemconfigure(bl.fil, fill=blend("#a97a30", "#fffbe3", b))
-            c.itemconfigure(bl.hl, fill=blend("#a97a30", "#fffef2", b))
-            if bl.g1 is not None:
-                for idx, (item, th) in enumerate(((bl.g1, 0.72), (bl.g2, 0.55), (bl.g3, 0.35))):
-                    on = b > th
-                    if on != bl.s[idx]:
-                        c.itemconfigure(item, state="normal" if on else "hidden")
-                        bl.s[idx] = on
+            c.itemconfigure(bl.body, fill=blend("#4a2f0e", "#ff9f1f", b))
+            c.itemconfigure(bl.mid, fill=blend("#6b4a18", "#ffd266", b))
+            c.itemconfigure(bl.core, fill=blend("#8c6a2a", "#fff4c6", b))
+            c.itemconfigure(bl.fil, fill=blend("#8c6a2a", "#fffbea", b))
+            c.itemconfigure(bl.hl, fill=blend("#8c6a2a", "#fffef4", b))
+            for idx, (item, th) in enumerate(zip(bl.g, (0.4, 0.55, 0.7, 0.8))):
+                on = b > th
+                if on != bl.s[idx]:
+                    c.itemconfigure(item, state="normal" if on else "hidden")
+                    bl.s[idx] = on
 
     def run(self):
         self.root.mainloop()
