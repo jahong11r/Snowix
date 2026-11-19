@@ -20,6 +20,7 @@ import math
 import os
 import random
 import sys
+import time
 import tkinter as tk
 
 KEY = "#010203"          # shaffof qilinadigan rang
@@ -62,6 +63,31 @@ def log_info(msg):
     _logs += 1
     if _logs <= 25:
         _write("qor_log.txt", msg)
+
+
+def covers_screen(rect, W, H, tol=2):
+    """Oyna butun ekranni qoplaydimi (to'liq ekranli o'yin/video)?"""
+    l, t, r, b = rect
+    return l <= tol and t <= tol and r >= W - tol and b >= H - tol
+
+
+def interaction_allowed(mode, ctrl_down):
+    """Sichqoncha bilan o'ynash rejimi: always | ctrl | off."""
+    return mode == "always" or (mode == "ctrl" and bool(ctrl_down))
+
+
+def next_flake_cap(cap, avg_ms, lo=100, hi=500, slow=26.0, fast=14.0):
+    """Kadr uzoq cho'zilsa qor zarralari sonini kamaytiradi, bo'sh bo'lsa qaytaradi."""
+    if avg_ms > slow:
+        return max(lo, int(cap * 0.88))
+    if avg_ms < fast and cap < hi:
+        return min(hi, int(cap * 1.06) + 1)
+    return cap
+
+
+def frame_delay(elapsed_ms, target=33.0):
+    """Kadr sarflagan vaqtni hisobga olib, keyingi kadrgacha kutish (ms)."""
+    return max(1, int(round(target - elapsed_ms)))
 
 
 def blend(c1, c2, t):
@@ -186,6 +212,10 @@ def setup_api():
     u.SendMessageW.restype = ctypes.c_ssize_t
     u.ClientToScreen.argtypes = [wintypes.HWND, ctypes.c_void_p]
     u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+    u.GetForegroundWindow.restype = wintypes.HWND
+    u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    u.SetWindowPos.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_uint]
     u.GetDC.argtypes = [wintypes.HWND]
     u.GetDC.restype = ctypes.c_void_p
     u.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
@@ -573,7 +603,7 @@ def rough_shape(n_lo, n_hi, lo, hi, stretch=1.0):
 
 class Flake:
     __slots__ = ("x", "y", "z", "tier", "r", "v", "ph", "fr", "wob", "ang", "spin",
-                 "shape", "item")
+                 "shape", "item", "px", "py", "k")
 
     def __init__(self, W, H, S, anywhere=False):
         self.item = None
@@ -593,12 +623,15 @@ class Flake:
         self.x = random.uniform(0, W)
         self.y = random.uniform(0, H) if anywhere else random.uniform(-0.25 * H, -4)
         self.ph = random.uniform(0, 6.28)
+        self.px = None            # oxirgi chizilgan joy (None = to'liq qayta chizish)
+        self.py = None
+        self.k = random.randrange(4)
 
 
 class Chunk:
     """Qor bo'lagi: katta bo'lak (sharcha parchasi), chang yoki yumshoq zarra (soft)."""
     __slots__ = ("x", "y", "vx", "vy", "r", "dust", "soft", "item", "shape", "ph",
-                 "vmax", "ang", "spin", "tier", "age")
+                 "vmax", "ang", "spin", "tier", "age", "px", "py")
 
     def __init__(self, x, y, vx, vy, r, dust):
         self.x, self.y, self.vx, self.vy, self.r = x, y, vx, vy, r
@@ -609,6 +642,7 @@ class Chunk:
         self.ph = self.vmax = self.ang = self.spin = 0.0
         self.tier = 3
         self.age = 0
+        self.px = self.py = None
 
 
 class Part:
@@ -892,6 +926,10 @@ class World:
         self.col = max(2, int(round(4 * S)))
         self.slope = 1.4 * S
         self.ground_pile = Pile(0, W, ground, self.col, 22 * S, self.slope, False, S)
+        self.xmin, self.xmax = 0, W          # ish maydoni chegaralari (taskbar yon tomonda bo'lsa)
+        self.ground_target = ground
+        self.bw = 64 * S
+        self.buckets = {}                    # x bo'yicha sirtlar (tez qidirish uchun)
         self.surfaces = {}
         self.surf_list = []
         self.n_flakes = 260
@@ -916,6 +954,8 @@ class World:
     def step(self, mx, my, down, rdown=False):
         self.t += 1
         t = self.t
+        if self.ground != self.ground_target:
+            self._ease_ground()
         self.wind = 0.5 * math.sin(t * 0.004) + 0.35 * math.sin(t * 0.0113 + 1.7)
         self.update_flakes()
         self.update_mouse(mx, my, down, rdown)
@@ -959,7 +999,8 @@ class World:
     def update_flakes(self):
         S, W, H = self.S, self.W, self.H
         gp = self.ground_pile
-        surfs = self.surf_list
+        buckets = self.buckets
+        bw = self.bw
         target = self.n_flakes if self.snowing else 0
         extra = len(self.flakes) - target
         alive = []
@@ -976,7 +1017,7 @@ class World:
                 f.x -= W
             landed = None
             besttop = None
-            for s in surfs:
+            for s in buckets.get(int(f.x // bw), ()):
                 if s.x0 <= f.x <= s.x1:
                     i = s.idx(f.x)
                     if (s.vis is not None and not s.vis[i]) or not s.solid(i):
@@ -1006,7 +1047,7 @@ class World:
 
     # ---------------- bo'laklar (chunk) ----------------
     def spawn_chunk(self, x, y, vx, vy, r, dust=False):
-        x = min(max(x, 1.0), self.W - 1.0)
+        x = min(max(x, self.xmin + 1.0), self.xmax - 1.0)
         lim = 30 * self.S
         vx = max(-lim, min(lim, vx))
         if len(self.chunks) >= MAX_CHUNKS:
@@ -1017,7 +1058,7 @@ class World:
     def spawn_soft(self, x, y, vx, vy, r):
         """Mayda, shakli notekis, yumshoq tushadigan qor zarrasi."""
         S = self.S
-        x = min(max(x, 1.0), self.W - 1.0)
+        x = min(max(x, self.xmin + 1.0), self.xmax - 1.0)
         lim = 30 * S
         vx = max(-lim, min(lim, vx))
         if len(self.chunks) >= MAX_CHUNKS:
@@ -1037,7 +1078,7 @@ class World:
         """Tushayotgan qor oyna yoki ikonka ustiga tushsa, o'sha sirtni qaytaradi.
         Oyna qor ichiga qarab siljisa ham (yuqoriga yoki yon tomonga), qorni ushlab oladi."""
         best, bt = None, None
-        for s in self.surf_list:
+        for s in self.buckets.get(int(x // self.bw), ()):
             if s.x0 <= x <= s.x1:
                 i = s.idx(x)
                 if (s.vis is not None and not s.vis[i]) or not s.solid(i):
@@ -1089,10 +1130,10 @@ class World:
                 c.vx *= 0.985
             c.x += c.vx
             c.y += c.vy
-            if c.x < 0:
-                c.x, c.vx = 0.0, abs(c.vx) * 0.3
-            elif c.x > W:
-                c.x, c.vx = float(W), -abs(c.vx) * 0.3
+            if c.x < self.xmin:
+                c.x, c.vx = float(self.xmin), abs(c.vx) * 0.3
+            elif c.x > self.xmax:
+                c.x, c.vx = float(self.xmax), -abs(c.vx) * 0.3
             target = self.land_on(c.x, oy, c.y) if c.age > 8 else None
             if target is None and c.y + c.r * 0.5 >= gp.y - gp.height_at(c.x):
                 target = gp
@@ -1223,6 +1264,39 @@ class World:
                             vy * 0.5 - random.uniform(0.2, 1.0) * lift
                             + random.uniform(-0.3, 0.8) * S, r)
 
+    def set_bounds(self, xmin, xmax, ground, instant=False):
+        """Ish maydoni (taskbar hisobga olingan) o'zgarsa yer va devorlar unga moslashadi."""
+        if xmax - xmin < 200:
+            return
+        self.xmin, self.xmax = xmin, xmax
+        self.ground_target = ground
+        if instant:
+            self.ground = ground
+        self.ground_pile.move(xmin, xmax, self.ground)
+
+    def _ease_ground(self):
+        """Taskbar siljisa yoki yashirinsa, yer silliq ko'tarilib/tushadi: qor va sharchalar birga."""
+        S = self.S
+        d = self.ground_target - self.ground
+        dy = d if abs(d) < 0.5 else max(-6 * S, min(6 * S, d * 0.25))
+        self.ground += dy
+        self.ground_pile.move(self.xmin, self.xmax, self.ground)
+        for b in self.balls:
+            b.y += dy
+
+    def impact_puff(self, x, y, speed, r):
+        """Sharcha yerga urilganda: qor ozgina botadi va mayda zarralar sachraydi."""
+        S = self.S
+        n = int(min(10, 2 + speed * 0.5 / S))
+        got = self.ground_pile.take(x, r * 0.6, n * 18)
+        pr = max(0.7 * S, math.sqrt(max(got, n * 10) / n / (math.pi * GAIN)))
+        k = 0.5 + speed / (20 * S)
+        for _ in range(n):
+            self.spawn_soft(x + random.uniform(-r * 0.6, r * 0.6), y - pr,
+                            random.uniform(-3, 3) * S * k,
+                            -random.uniform(0.8, 2.2) * S * (1 + speed / (12 * S)),
+                            pr * random.uniform(0.7, 1.2))
+
     def fling_icon(self, idx, vx, vy):
         """Ikonka sudralayotganda ustidagi qor sudrash tomoniga sachrab uchadi."""
         s = self.surfaces.get(("i", idx))
@@ -1281,9 +1355,9 @@ class World:
             p.x += p.vx
             p.y += p.vy
             p.ang += p.vang
-            if p.x < 0 or p.x > self.W:
+            if p.x < self.xmin or p.x > self.xmax:
                 p.vx = -p.vx * 0.5
-                p.x = min(max(p.x, 0.0), float(self.W))
+                p.x = min(max(p.x, float(self.xmin)), float(self.xmax))
             gy = gp.y - gp.height_at(p.x)
             if p.y + p.ext >= gy:
                 p.y = gy - p.ext
@@ -1373,7 +1447,7 @@ class World:
                 if s.h[i] >= 2.5 * S and s.top_at(i) - 4 * S <= my <= s.surf_y(i) + 2 * S:
                     return ("pile", s)
         gp = self.ground_pile
-        if 0 <= mx < self.W and my <= gp.y:
+        if self.xmin <= mx < self.xmax and my <= gp.y:
             h = gp.height_at(mx)
             if h >= 3 * S and my >= gp.y - h - 4 * S:
                 return ("pile", gp)
@@ -1422,13 +1496,13 @@ class World:
                 if got > 0:
                     b.r = min(MAX_BALL * S,
                               b.r + got * BALL_GAIN / (2 * math.pi * b.r))
-            b.x = min(max(mx, b.r), self.W - b.r)
+            b.x = min(max(mx, self.xmin + b.r), self.xmax - b.r)
             b.y = self.ground - b.r
             if my < b.y - b.r - 25 * S:
                 b.state = "held"
                 self.grab = (b.x - mx, b.y - my)
         else:
-            b.x = min(max(mx + self.grab[0], b.r), self.W - b.r)
+            b.x = min(max(mx + self.grab[0], self.xmin + b.r), self.xmax - b.r)
             b.y = min(max(my + self.grab[1], b.r), self.ground - b.r)
 
     def grab_ball(self, b, mx, my):
@@ -1479,12 +1553,12 @@ class World:
             r = b.r
             thr = max(14 * S, 21 * S - 0.15 * r)    # shu tezlikdan oshsa — parchalanadi
             sp = math.hypot(b.vx, b.vy)
-            if b.x < r or b.x > self.W - r:
-                sign = 1.0 if b.x < r else -1.0
+            if b.x < self.xmin + r or b.x > self.xmax - r:
+                sign = 1.0 if b.x < self.xmin + r else -1.0
                 if abs(b.vx) > thr:
                     self.shatter_ball(b, (sign, 0.0), sp)
                     continue
-                b.x = r if sign > 0 else self.W - r
+                b.x = self.xmin + r if sign > 0 else self.xmax - r
                 b.vx = sign * abs(b.vx) * 0.5
             if b.y < r:
                 b.y = r
@@ -1495,6 +1569,8 @@ class World:
                 if b.vy > thr:
                     self.shatter_ball(b, (0.0, -1.0), sp)
                     continue
+                if b.vy > 5 * S:
+                    self.impact_puff(b.x, self.ground, b.vy, b.r)
                 b.vy = -b.vy * 0.25 if b.vy > 2.5 * S else 0.0
                 b.vx *= 0.93
             done = False
@@ -1621,6 +1697,10 @@ class World:
                     self.dead.append(pair[0])
                     self.dead.append(pair[1])
         self.surf_list = [s for s in self.surfaces.values() if s.active]
+        self.buckets = {}
+        for s in self.surf_list:
+            for k in range(int(s.x0 // self.bw), int(s.x1 // self.bw) + 1):
+                self.buckets.setdefault(k, []).append(s)
 
     def _upd_surface(self, key, kind, x0, x1, y, higher, profile):
         S = self.S
