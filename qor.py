@@ -210,6 +210,10 @@ def setup_api():
     u.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
                                ctypes.c_ssize_t]
     u.SendMessageW.restype = ctypes.c_ssize_t
+    u.SendMessageTimeoutW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_size_t,
+                                      ctypes.c_ssize_t, ctypes.c_uint, ctypes.c_uint,
+                                      ctypes.c_void_p]
+    u.SendMessageTimeoutW.restype = ctypes.c_ssize_t
     u.ClientToScreen.argtypes = [wintypes.HWND, ctypes.c_void_p]
     u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
     u.GetForegroundWindow.restype = wintypes.HWND
@@ -436,6 +440,8 @@ class DesktopIcons:
         self.cache = {}
         self.nq = 0
         self.logged = False
+        self.last_out = []
+        self.skip = 0
         try:
             self.u, _ = setup_api()
             from ctypes import wintypes
@@ -494,6 +500,14 @@ class DesktopIcons:
         self.lv, self.proc, self.remote = lv, proc, remote
         self.ok = True
 
+    def send(self, msg, wp, lp):
+        """Explorer'ga xabar yuboradi; u javob bermasa (qotsa) 60 ms dan keyin voz kechadi."""
+        res = ctypes.c_size_t(0)
+        ok = self.u.SendMessageTimeoutW(self.lv, msg, wp, lp, 0x2, 60, ctypes.byref(res))
+        if not ok:
+            raise TimeoutError("explorer javob bermadi")
+        return res.value
+
     def capture(self, l, t, r, b, sel=False):
         S = self.S
         m = 4
@@ -527,10 +541,13 @@ class DesktopIcons:
                 return []
         u, k, S = self.u, self.k, self.S
         mx, my, down = mouse
+        if self.skip > 0:             # explorer band edi: biroz kutamiz, eski natijani saqlaymiz
+            self.skip -= 1
+            return self.last_out
         try:
             if not u.IsWindowVisible(self.lv):
                 return []
-            count = u.SendMessageW(self.lv, 0x1004, 0, 0)       # LVM_GETITEMCOUNT
+            count = self.send(0x1004, 0, 0)                     # LVM_GETITEMCOUNT
             if count <= 0 or count > 300:
                 return []
             org = POINT(0, 0)
@@ -541,7 +558,7 @@ class DesktopIcons:
             for i in range(count):
                 r = RECT(1, 0, 0, 0)                            # LVIR_ICON
                 k.WriteProcessMemory(self.proc, self.remote, ctypes.byref(r), 16, None)
-                if not u.SendMessageW(self.lv, 0x100E, i, self.remote):
+                if not self.send(0x100E, i, self.remote):
                     continue
                 k.ReadProcessMemory(self.proc, self.remote, ctypes.byref(r), 16, None)
                 l, t = org.x + r.l, org.y + r.t
@@ -558,7 +575,7 @@ class DesktopIcons:
                     pts = ((l + 2, t + 2), (rr - 2, t + 2), ((l + rr) / 2, (t + bb) / 2),
                            (l + 2, bb - 2), (rr - 2, bb - 2))
                     near = (l - 12 * S <= mx <= rr + 12 * S and t - 12 * S <= my <= bb + 12 * S)
-                    state = u.SendMessageW(self.lv, 0x102C, i, 0x000A)   # SELECTED|DROPHILITED
+                    state = self.send(0x102C, i, 0x000A)         # SELECTED|DROPHILITED
                     if not near and not any(covered(x, y) for x, y in pts):
                         captures += 1
                         prof = self.capture(l, t, rr, bb, bool(state))
@@ -571,7 +588,11 @@ class DesktopIcons:
             if not self.logged and out:
                 self.logged = True
                 log_info("Ikonkalar topildi: %d ta" % len(out))
+            self.last_out = out
             return out
+        except TimeoutError:
+            self.skip = 20
+            return self.last_out
         except Exception:
             self.ok = False
             self.why = "so'rov xatosi"
@@ -928,6 +949,8 @@ class World:
         self.ground_pile = Pile(0, W, ground, self.col, 22 * S, self.slope, False, S)
         self.xmin, self.xmax = 0, W          # ish maydoni chegaralari (taskbar yon tomonda bo'lsa)
         self.ground_target = ground
+        self.low = False                     # kuchsiz kompyuter rejimi
+        self.max_chunks = MAX_CHUNKS
         self.bw = 64 * S
         self.buckets = {}                    # x bo'yicha sirtlar (tez qidirish uchun)
         self.surfaces = {}
@@ -968,7 +991,7 @@ class World:
             if t >= ev[0]:
                 self.events.remove(ev)
                 ev[1]()
-        if t % 2 == 0:
+        if t % (4 if self.low else 2) == 0:
             gp = self.ground_pile
             gp.relax()
             gp.h = [v * 0.9991 for v in gp.h]     # juda sekin erish: qor haddan oshmaydi
@@ -1050,7 +1073,7 @@ class World:
         x = min(max(x, self.xmin + 1.0), self.xmax - 1.0)
         lim = 30 * self.S
         vx = max(-lim, min(lim, vx))
-        if len(self.chunks) >= MAX_CHUNKS:
+        if len(self.chunks) >= self.max_chunks:
             self.ground_pile.add(x, r)
             return
         self.chunks.append(Chunk(x, y, vx, vy, r, dust))
@@ -1061,7 +1084,7 @@ class World:
         x = min(max(x, self.xmin + 1.0), self.xmax - 1.0)
         lim = 30 * S
         vx = max(-lim, min(lim, vx))
-        if len(self.chunks) >= MAX_CHUNKS:
+        if len(self.chunks) >= self.max_chunks:
             self.ground_pile.add(x, r)
             return
         c = Chunk(x, y, vx, vy, r, False)
@@ -1098,7 +1121,7 @@ class World:
             c.age += 1
             oy = c.y
             if (not c.dust and not c.soft and c.r > 2.6 * S and random.random() < 0.025
-                    and len(alive) + len(self.chunks) < MAX_CHUNKS * 1.5):
+                    and len(alive) + len(self.chunks) < self.max_chunks * 1.5):
                 # havoda katta qor bo'lagi yumshoq bo'laklarga ajraladi
                 k = random.choice((2, 3))
                 nr = c.r / math.sqrt(k) * 0.95
@@ -1264,6 +1287,11 @@ class World:
                             vy * 0.5 - random.uniform(0.2, 1.0) * lift
                             + random.uniform(-0.3, 0.8) * S, r)
 
+    def set_low(self, flag):
+        """Kuchsiz kompyuter rejimi: kamroq bo'lak va kamroq hisob-kitob."""
+        self.low = bool(flag)
+        self.max_chunks = 200 if flag else MAX_CHUNKS
+
     def set_bounds(self, xmin, xmax, ground, instant=False):
         """Ish maydoni (taskbar hisobga olingan) o'zgarsa yer va devorlar unga moslashadi."""
         if xmax - xmin < 200:
@@ -1292,7 +1320,8 @@ class World:
         pr = max(0.7 * S, math.sqrt(max(got, n * 10) / n / (math.pi * GAIN)))
         k = 0.5 + speed / (20 * S)
         for _ in range(n):
-            self.spawn_soft(x + random.uniform(-r * 0.6, r * 0.6), y - pr,
+            px = x + random.uniform(-r * 0.6, r * 0.6)
+            self.spawn_soft(px, self.ground_pile.top_y_at(px) - pr,
                             random.uniform(-3, 3) * S * k,
                             -random.uniform(0.8, 2.2) * S * (1 + speed / (12 * S)),
                             pr * random.uniform(0.7, 1.2))
@@ -1823,7 +1852,7 @@ def layout_bulbs(W, S, pegs):
 
 
 class Bulb:
-    __slots__ = ("body", "mid", "core", "fil", "hl", "g", "ph", "lvl", "s", "k")
+    __slots__ = ("rim", "mid", "core", "hot", "fil", "lvl", "k")
 
 
 class App:
@@ -1854,12 +1883,15 @@ class App:
         root.update()
 
         self.world = World(self.W, self.H, self.ground, S)
+        if wa:
+            self.world.set_bounds(wa[0], wa[2], wa[3], instant=True)
         self.sm_sig = None
         self.lights_on = tk.BooleanVar(value=True)
         self.snow_var = tk.BooleanVar(value=True)
         self.auto_var = tk.BooleanVar(value=autostart_get())
         self.win_snow = tk.BooleanVar(value=True)
         self.icon_snow = tk.BooleanVar(value=True)
+        self.mode_var = tk.StringVar(value="always")    # always | ctrl | off
         self.bulbs = []
         self.twinkle = {}
         self.pegs = None
@@ -1878,6 +1910,14 @@ class App:
         self.last_wins = []
         self.mouse = (-1, -1, False)
         self.refresh_n = 0
+        self.user_flakes = 260
+        self.flake_cap = 500
+        self.avg_ms = 0.0
+        self.low_perf = False
+        self.slow_n = 0
+        self.paused = False
+        self.fs_votes = 0
+        self.tick_n = 0
 
         self.panel = self.build_panel()
         self.root.after(30, self.tick)
@@ -1911,7 +1951,7 @@ class App:
         bg, fg = "#0f2742", "#e8f2ff"
         p = tk.Toplevel(self.root)
         p.title("Yangi yil qori")
-        p.geometry("%dx%d+%d+%d" % (int(350 * S), int(640 * S), int(70 * S), int(90 * S)))
+        p.geometry("%dx%d+%d+%d" % (int(350 * S), int(740 * S), int(70 * S), int(60 * S)))
         p.resizable(False, False)
         p.configure(bg=bg)
         p.protocol("WM_DELETE_WINDOW", self.quit)
@@ -1935,7 +1975,8 @@ class App:
                  bg=bg, fg="#cfe3ff", font=("Segoe UI", 9)).pack(padx=14, pady=6)
 
         def on_scale(v):
-            self.world.n_flakes = int(float(v))
+            self.user_flakes = int(float(v))
+            self.world.n_flakes = min(self.user_flakes, self.flake_cap)
 
         sc = tk.Scale(p, from_=20, to=500, orient="horizontal", label="Qor miqdori",
                       command=on_scale, bg=bg, fg=fg, troughcolor="#1d4e89",
@@ -1956,6 +1997,15 @@ class App:
         chk("Yangi yil chiroqlari (tepada)", self.lights_on)
         chk("Kompyuter yonganda o'zi ishga tushsin", self.auto_var,
             lambda: autostart_set(self.auto_var.get()))
+
+        tk.Label(p, text="Sichqoncha bilan o'ynash:", bg=bg, fg=fg,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=28, pady=(8, 0))
+        for text, val in (("Har doim", "always"), ("Faqat Ctrl bosilganda", "ctrl"),
+                          ("O'chiq (faqat tomosha)", "off")):
+            tk.Radiobutton(p, text=text, variable=self.mode_var, value=val, bg=bg, fg=fg,
+                           selectcolor="#1d4e89", activebackground=bg,
+                           activeforeground="white", font=("Segoe UI", 10)
+                           ).pack(anchor="w", padx=44)
 
         row = tk.Frame(p, bg=bg)
         row.pack(pady=14)
@@ -1979,7 +2029,7 @@ class App:
         return False
 
     def refresh_surfaces(self):
-        wins = self.scanner.scan(self.W, self.H, self.ground)
+        wins = self.scanner.scan(self.W, self.H, self.world.ground)
         self.last_wins = wins
         if not self.win_snow.get():
             wins = [(k, a, b, c, d, False) for (k, a, b, c, d, ok) in wins]
@@ -1989,30 +2039,108 @@ class App:
         self.refresh_n += 1
         self.world.set_surfaces(wins, self.icons)
 
-    def tick(self):
+    def poll_work_area(self):
+        """Taskbar siljisa, yashirinsa yoki o'lchami o'zgarsa yer va devorlar moslashadi."""
+        wa = work_area()
+        if wa:
+            self.world.set_bounds(wa[0], wa[2], wa[3])
+
+    def show_overlay(self, visible):
         try:
-            try:
-                mx, my = cursor_pos()
-                down = button_down(0x01)
-                rdown = button_down(0x02)
-            except Exception:
-                mx, my, down, rdown = -1, -1, False, False
-            self.mouse = (mx, my, down)
-            w = self.world
-            if self.icon_snow.get():
-                self.icon_drag.update(mx, my, down, self.icons, self.covered, w.fling_icon)
-            if w.t % 2 == 0:
-                self.refresh_surfaces()
+            u, _ = setup_api()
+            u.ShowWindow(self.hwnd, 4 if visible else 0)         # SHOWNOACTIVATE | HIDE
+            if visible:
+                u.SetWindowPos(self.hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0013)
+        except Exception:
+            pass
+
+    def check_fullscreen(self):
+        """To'liq ekranli ilova (o'yin, video) ochiq bo'lsa, qor to'xtaydi va yashiriladi."""
+        fs = False
+        try:
+            u, _ = setup_api()
+            fg = u.GetForegroundWindow()
+            if fg and int(fg) != int(self.hwnd or 0):
+                cls = ctypes.create_unicode_buffer(80)
+                u.GetClassNameW(fg, cls, 80)
+                if cls.value not in SKIP_CLASSES and not u.IsZoomed(fg) and not u.IsIconic(fg):
+                    r = RECT()
+                    u.GetWindowRect(fg, ctypes.byref(r))
+                    fs = covers_screen((r.l, r.t, r.r, r.b), self.W, self.H)
+        except Exception:
+            fs = False
+        self.fs_votes = self.fs_votes + 1 if fs else 0
+        want = (self.fs_votes >= 2) if not self.paused else (self.fs_votes > 0)
+        if want != self.paused:
+            self.paused = want
+            self.show_overlay(not want)
+
+    def govern(self):
+        """Kompyuter sekin ishlasa, avval qor zarralari kamayadi, keyin yengil rejimga o'tadi
+        (chiroqlar harakatsiz, kamroq bo'lak, kam kadr). Bo'shagach hammasi qaytadi."""
+        cap = next_flake_cap(self.flake_cap, self.avg_ms, lo=60)
+        if cap != self.flake_cap:
+            self.flake_cap = cap
+            self.world.n_flakes = min(self.user_flakes, cap)
+        if self.avg_ms > 26 and self.flake_cap <= 70:
+            self.slow_n += 1
+        else:
+            self.slow_n = 0
+        if not self.low_perf and self.slow_n >= 2:
+            self.low_perf = True
+            self.world.set_low(True)
+        elif self.low_perf and self.avg_ms < 12:
+            self.low_perf = False
+            self.world.set_low(False)
+
+    def run_frame(self):
+        try:
+            mx, my = cursor_pos()
+            down = button_down(0x01)
+            rdown = button_down(0x02)
+        except Exception:
+            mx, my, down, rdown = -1, -1, False, False
+        mode = self.mode_var.get()
+        allow = interaction_allowed(mode, button_down(0x11) if mode == "ctrl" else False)
+        self.mouse = (mx, my, down)
+        w = self.world
+        if self.icon_snow.get():
+            self.icon_drag.update(mx, my, down, self.icons, self.covered, w.fling_icon)
+        if w.t % 15 == 0:
+            self.poll_work_area()
+        every = 2 if any(s.moving for s in w.surfaces.values()) else (8 if self.low_perf else 4)
+        if w.t % every == 0:
+            self.refresh_surfaces()
+        if allow or w.held is not None:
             w.step(mx, my, down, rdown)
-            want = (w.held is not None) or (w.hit_test(mx, my) is not None)
-            if want == self.click_through:
-                self.set_click_through(not want)
-            self.draw()
+        else:
+            w.step(mx, my, False, False)    # o'yin o'chiq: qor sichqonchaga javob bermaydi
+        want = (w.held is not None) or (allow and w.hit_test(mx, my) is not None)
+        if want == self.click_through:
+            self.set_click_through(not want)
+        self.draw()
+
+    def tick(self):
+        t0 = time.perf_counter()
+        delay = 33
+        try:
+            self.tick_n += 1
+            if self.tick_n == 1 or self.tick_n % (2 if self.paused else 10) == 0:
+                self.check_fullscreen()
+            if self.paused:
+                delay = 250
+            else:
+                self.run_frame()
+                el = (time.perf_counter() - t0) * 1000.0
+                self.avg_ms = 0.9 * self.avg_ms + 0.1 * el
+                if self.tick_n % 60 == 0:
+                    self.govern()
+                delay = frame_delay(el, 40.0 if self.low_perf else 33.0)
         except Exception:
             log_error()
         finally:
             try:
-                self.root.after(30, self.tick)
+                self.root.after(delay, self.tick)
             except Exception:
                 pass
 
@@ -2033,21 +2161,30 @@ class App:
             c.delete(it)
         w.dead.clear()
 
+        t = w.t
         for f in w.flakes:
-            pts = rot(f.shape, f.ang, f.x, f.y, f.r)
-            if f.item is None:
-                f.item = c.create_polygon(*pts, fill=FLAKE_FILL[f.tier], outline="")
+            if f.item is None or f.px is None or (t + f.k) % 4 == 0:
+                pts = rot(f.shape, f.ang, f.x, f.y, f.r)     # aylanish: har 4-kadrda
+                if f.item is None:
+                    f.item = c.create_polygon(*pts, fill=FLAKE_FILL[f.tier], outline="")
+                else:
+                    c.coords(f.item, *pts)
             else:
-                c.coords(f.item, *pts)
+                c.move(f.item, f.x - f.px, f.y - f.py)       # qolgan kadrlarda faqat siljish
+            f.px, f.py = f.x, f.y
 
         for ch in w.chunks:
             r = ch.r
             if ch.soft:
-                pts = rot(ch.shape, ch.ang, ch.x, ch.y, r)
-                if ch.item is None:
-                    ch.item = c.create_polygon(*pts, fill=FLAKE_FILL[ch.tier], outline="")
+                if ch.item is None or ch.px is None or ch.age % 3 == 0:
+                    pts = rot(ch.shape, ch.ang, ch.x, ch.y, r)
+                    if ch.item is None:
+                        ch.item = c.create_polygon(*pts, fill=FLAKE_FILL[ch.tier], outline="")
+                    else:
+                        c.coords(ch.item, *pts)
                 else:
-                    c.coords(ch.item, *pts)
+                    c.move(ch.item, ch.x - ch.px, ch.y - ch.py)
+                ch.px, ch.py = ch.x, ch.y
             elif ch.dust:
                 if ch.item is None:
                     ch.item = c.create_oval(0, 0, 0, 0, fill="#f4f9ff", outline="")
@@ -2212,7 +2349,9 @@ class App:
             c.create_oval(tipx - 0.22 * r2, tipy - 0.22 * r2, tipx + 0.22 * r2,
                           tipy + 0.22 * r2, fill=WHITE, outline="", tags="snowman")
 
-    # ---------- Yangi yil chiroqlari (iliq oq, yashil soketli, qizg'ish o'ralgan sim) ----------
+    # ---------- Yangi yil chiroqlari: iliq oq lampochkalar, yashil soket, o'ralgan sim ----------
+    # Faqat lampochkaning o'zi yonadi (atrofida nur doirasi yo'q). Yonib bo'lgach
+    # chiroqlar harakatsiz turadi: kuchsiz kompyuterda ham hech narsa sarflamaydi.
     def build_lights(self):
         c, S, W = self.canvas, self.S, self.W
         c.delete("lights")
@@ -2229,96 +2368,85 @@ class App:
             pb += [x, y - tw]
             x += 3.0
         wd = max(2, int(2 * S))
-        c.create_line(*pb, fill="#3d2218", width=wd, tags="lights")
-        c.create_line(*pa, fill="#7a2323", width=wd, tags="lights")
-        for (px, seg, sag) in self.pegs:
-            if 0 <= px <= W:
-                r = 2.0 * S
-                py = wire_y(self.pegs, px, S)
-                c.create_oval(px - r, py - r, px + r, py + r, fill="#8d949b",
-                              outline="#4a4f55", tags="lights")
-        glow = ((2.7, "#ff9a1f", "gray12"), (2.0, "#ffa826", "gray25"),
-                (1.45, "#ffb82e", "gray50"), (1.15, "#ffcb4a", "gray75"))
+        c.create_line(*pb, fill="#3d1c1c", width=wd, tags="lights")
+        c.create_line(*pa, fill="#7f2a2a", width=wd, tags="lights")
         for k, (x, y, th, ph) in enumerate(layout_bulbs(W, S, self.pegs)):
             dx, dy = math.sin(th), math.cos(th)
             nx, ny = -dy, dx
             Ls, a, b = 4.5 * S, 8.5 * S, 5.0 * S
             cx, cy = x + dx * (Ls + a * 0.95), y + dy * (Ls + a * 0.95)
-            bl = Bulb()
-            bl.g = []
-            try:           # yumshoq yorug'lik: 4 zichlikdagi (stipple) halqalar
-                for (m, col, stip) in glow:
-                    bl.g.append(c.create_oval(cx - m * a, cy - m * a, cx + m * a, cy + m * a,
-                                              fill=col, outline="", stipple=stip,
-                                              state="hidden", tags="lights"))
-            except tk.TclError:
-                bl.g = []
             c.create_polygon(x + nx * 1.7 * S, y + ny * 1.7 * S, x - nx * 1.7 * S,
                              y - ny * 1.7 * S, x + dx * Ls - nx * 2.3 * S,
                              y + dy * Ls - ny * 2.3 * S, x + dx * Ls + nx * 2.3 * S,
                              y + dy * Ls + ny * 2.3 * S, fill="#1f5a2c",
                              outline="#10381a", tags="lights")
-            for f in (0.3, 0.55, 0.8):
+            for f in (0.4, 0.75):
                 w_ = (1.7 + 0.6 * f) * S
                 c.create_line(x + dx * Ls * f + nx * w_, y + dy * Ls * f + ny * w_,
                               x + dx * Ls * f - nx * w_, y + dy * Ls * f - ny * w_,
                               fill="#2f7a40", width=1, tags="lights")
-            bl.body = c.create_polygon(*egg_points(cx, cy, a, b, dx, dy), fill="#4a2f0e",
-                                       outline="", tags="lights")
+            bl = Bulb()
+            bl.rim = c.create_polygon(*egg_points(cx, cy, a, b, dx, dy), fill="#4a2f0e",
+                                      outline="", tags="lights")
             bl.mid = c.create_polygon(*egg_points(cx + dx * 0.3 * S, cy + dy * 0.3 * S,
-                                                  a * 0.82, b * 0.78, dx, dy, 18),
+                                                  a * 0.84, b * 0.8, dx, dy, 18),
                                       fill="#6b4a18", outline="", tags="lights")
             bl.core = c.create_polygon(*egg_points(cx + dx * 0.6 * S, cy + dy * 0.6 * S,
-                                                   a * 0.55, b * 0.5, dx, dy, 16),
+                                                   a * 0.62, b * 0.55, dx, dy, 16),
                                        fill="#8c6a2a", outline="", tags="lights")
-            fo = b * 0.2
-            bl.fil = c.create_line(cx - dx * a * 0.42 + nx * fo, cy - dy * a * 0.42 + ny * fo,
+            bl.hot = c.create_polygon(*egg_points(cx + dx * 0.9 * S, cy + dy * 0.9 * S,
+                                                  a * 0.36, b * 0.3, dx, dy, 12),
+                                      fill="#a58a4a", outline="", tags="lights")
+            fo = b * 0.16
+            bl.fil = c.create_line(cx - dx * a * 0.4 + nx * fo, cy - dy * a * 0.4 + ny * fo,
                                    cx + dx * a * 0.3 + nx * fo, cy + dy * a * 0.3 + ny * fo,
                                    cx + dx * a * 0.3 - nx * fo, cy + dy * a * 0.3 - ny * fo,
-                                   cx - dx * a * 0.42 - nx * fo, cy - dy * a * 0.42 - ny * fo,
-                                   fill="#8c6a2a", width=max(1, int(S * 0.7)), tags="lights")
-            bl.hl = c.create_polygon(*egg_points(cx - nx * b * 0.5 - dx * a * 0.1,
-                                                 cy - ny * b * 0.5 - dy * a * 0.1,
-                                                 a * 0.35, b * 0.14, dx, dy, 10),
-                                     fill="#8c6a2a", outline="", tags="lights")
-            bl.ph = ph
+                                   cx - dx * a * 0.4 - nx * fo, cy - dy * a * 0.4 - ny * fo,
+                                   fill="#8c6a2a", width=1, tags="lights")
             bl.k = k
             bl.lvl = -1
-            bl.s = [False] * len(bl.g)
             self.bulbs.append(bl)
         self.lights_built = True
 
+    def _paint_bulb(self, bl, b):
+        c = self.canvas
+        c.itemconfigure(bl.rim, fill=blend("#4a2f0e", "#ffb733", b))
+        c.itemconfigure(bl.mid, fill=blend("#6b4a18", "#ffd35c", b))
+        c.itemconfigure(bl.core, fill=blend("#8c6a2a", "#ffe99a", b))
+        c.itemconfigure(bl.hot, fill=blend("#a58a4a", "#fffbe0", b))
+        c.itemconfigure(bl.fil, fill=blend("#8c6a2a", "#fff3c0", b))
+
     def update_lights(self):
-        c, t = self.canvas, self.world.t
-        tw = self.twinkle
-        if self.bulbs and random.random() < 0.12:      # ba'zan bitta lampa pirpirab o'tadi
-            k = random.randrange(len(self.bulbs))
+        t, tw = self.world.t, self.twinkle
+        n = len(self.bulbs)
+        if not n:
+            return
+        t0 = self.lights_t0
+        if t - t0 < n * 2 + 24:                     # boshida birin-ketin yonadi
+            for bl in self.bulbs:
+                b = max(0.0, min(1.0, (t - t0 - bl.k * 2) / 18.0)) ** 1.5
+                lvl = int(b * 14)
+                if lvl != bl.lvl:
+                    bl.lvl = lvl
+                    self._paint_bulb(bl, b)
+            return
+        # yonib bo'ldi: harakatsiz. Ba'zan bitta lampa pirpirab o'tadi (yengil rejimda yo'q).
+        if not self.low_perf and random.random() < 0.04:
+            k = random.randrange(n)
             if k not in tw:
                 tw[k] = t
-        t0 = self.lights_t0
-        for bl in self.bulbs:
-            ramp = max(0.0, min(1.0, (t - t0 - bl.k * 2) / 18.0))   # birin-ketin yonadi
-            b = (0.94 + 0.06 * math.sin(t * 0.05 + bl.ph)) * ramp ** 1.5
-            if bl.k in tw:
-                u = (t - tw[bl.k]) / 24.0
-                if u >= 1:
-                    del tw[bl.k]
-                else:
-                    b *= 1 - 0.75 * math.sin(math.pi * u)
+        for k in list(tw):
+            u = (t - tw[k]) / 24.0
+            bl = self.bulbs[k]
+            if u >= 1:
+                del tw[k]
+                b = 1.0
+            else:
+                b = 1 - 0.75 * math.sin(math.pi * u)
             lvl = int(b * 14)
-            if lvl == bl.lvl:
-                continue
-            bl.lvl = lvl
-            c.itemconfigure(bl.body, fill=blend("#4a2f0e", "#ff9f1f", b))
-            c.itemconfigure(bl.mid, fill=blend("#6b4a18", "#ffd266", b))
-            c.itemconfigure(bl.core, fill=blend("#8c6a2a", "#fff4c6", b))
-            c.itemconfigure(bl.fil, fill=blend("#8c6a2a", "#fffbea", b))
-            c.itemconfigure(bl.hl, fill=blend("#8c6a2a", "#fffef4", b))
-            for idx, (item, th) in enumerate(zip(bl.g, (0.4, 0.55, 0.7, 0.8))):
-                on = b > th
-                if on != bl.s[idx]:
-                    c.itemconfigure(item, state="normal" if on else "hidden")
-                    bl.s[idx] = on
+            if lvl != bl.lvl:
+                bl.lvl = lvl
+                self._paint_bulb(bl, b)
 
     def run(self):
         self.root.mainloop()
