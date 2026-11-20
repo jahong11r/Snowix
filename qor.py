@@ -622,9 +622,50 @@ def rough_shape(n_lo, n_hi, lo, hi, stretch=1.0):
     return pts
 
 
+def dendrite_shape(rnd, pairs=2):
+    """Olti nurli qor kristali (dendrit): har bir nurda yon shoxchalar. Birlik radiusli kontur."""
+    w = 0.055
+    ps = [0.34, 0.62][:pairs]
+    ls = [rnd.uniform(0.22, 0.29), rnd.uniform(0.16, 0.24)][:pairs]   # qo'shni nurga tegmasin
+    lower = [(0.10, -w)]
+    for p, l in zip(ps, ls):
+        lower += [(p - 0.03, -w), (p + l * 0.5, -l * 0.87), (p + 0.05, -w)]
+    upper = [(x, -y) for (x, y) in reversed(lower)]
+    arm = lower + [(1.0, 0.0)] + upper
+    pts = []
+    for k in range(6):
+        a = k * math.pi / 3
+        ca, sa = math.cos(a), math.sin(a)
+        pts += [(x * ca - y * sa, x * sa + y * ca) for (x, y) in arm]
+    return pts
+
+
+def star_shape(inner):
+    """Oddiy olti nurli yulduzcha yoki (inner~0.6) burchakli olti qirrali plastinka."""
+    pts = []
+    for k in range(6):
+        a = k * math.pi / 3
+        pts.append((math.cos(a), math.sin(a)))
+        a2 = a + math.pi / 6
+        pts.append((inner * math.cos(a2), inner * math.sin(a2)))
+    return pts
+
+
+def _build_shapes():
+    rnd = random.Random(5)
+    return {
+        "dendrite": [dendrite_shape(rnd, 2) for _ in range(6)],
+        "small": [dendrite_shape(rnd, 1), dendrite_shape(rnd, 1), star_shape(0.30),
+                  star_shape(0.38), star_shape(0.62)],
+    }
+
+
+SHAPES = _build_shapes()
+
+
 class Flake:
     __slots__ = ("x", "y", "z", "tier", "r", "v", "ph", "fr", "wob", "ang", "spin",
-                 "shape", "item", "px", "py", "k")
+                 "shape", "item", "px", "py", "k", "dr", "ri", "fill")
 
     def __init__(self, W, H, S, anywhere=False):
         self.item = None
@@ -640,7 +681,23 @@ class Flake:
         self.wob = random.uniform(0.25, 0.8)
         self.ang = random.uniform(0, 6.28)
         self.spin = random.uniform(-0.06, 0.06)
-        self.shape = rough_shape(4, 6, 0.6, 1.25, 1.0 + z * random.uniform(0.2, 1.2))
+        if z < 0.5:                       # ko'pchiligi: mayda notekis zarralar
+            self.shape = rough_shape(4, 6, 0.6, 1.25, 1.0 + z * random.uniform(0.2, 1.2))
+            self.dr = self.r
+            self.ri = 4
+            self.fill = FLAKE_FILL[self.tier]
+        elif z < 0.82:                    # kichik yulduzcha / plastinka
+            self.shape = random.choice(SHAPES["small"])
+            self.dr = random.uniform(1.7, 2.7) * S
+            self.ri = 6
+            self.spin *= 0.5
+            self.fill = "#f1f7ff"
+        else:                             # kamdan-kam: shoxchali kristall (dendrit)
+            self.shape = random.choice(SHAPES["dendrite"])
+            self.dr = random.uniform(5.0, 7.0) * S      # nurlari ko'rinadigan eng kichik o'lcham
+            self.ri = 6
+            self.spin *= 0.4
+            self.fill = WHITE
         self.x = random.uniform(0, W)
         self.y = random.uniform(0, H) if anywhere else random.uniform(-0.25 * H, -4)
         self.ph = random.uniform(0, 6.28)
@@ -2162,13 +2219,16 @@ class App:
         w.dead.clear()
 
         t = w.t
+        still = self.low_perf               # yengil rejimda zarralar aylanmaydi
         for f in w.flakes:
-            if f.item is None or f.px is None or (t + f.k) % 4 == 0:
-                pts = rot(f.shape, f.ang, f.x, f.y, f.r)     # aylanish: har 4-kadrda
+            if f.item is None or f.px is None or (not still and (t + f.k) % f.ri == 0):
+                pts = rot(f.shape, f.ang, f.x, f.y, f.dr)    # aylanish: har 4-6 kadrda
                 if f.item is None:
-                    f.item = c.create_polygon(*pts, fill=FLAKE_FILL[f.tier], outline="")
+                    f.item = c.create_polygon(*pts, fill=f.fill, outline="")
                 else:
                     c.coords(f.item, *pts)
+                    if f.px is None:                         # yangi zarra: rangi ham yangilanadi
+                        c.itemconfigure(f.item, fill=f.fill)
             else:
                 c.move(f.item, f.x - f.px, f.y - f.py)       # qolgan kadrlarda faqat siljish
             f.px, f.py = f.x, f.y
